@@ -44,7 +44,28 @@ Scheduled workflows in this repo post audit reports and status digests as issues
 | [`org-scorecard.yml`](https://github.com/petry-projects/.github/blob/main/.github/workflows/org-scorecard.yml) | Weekly OpenSSF Scorecard security-posture review across public repos; findings tracked as issues |
 | [`standards-deploy.yml`](https://github.com/petry-projects/.github/blob/main/.github/workflows/standards-deploy.yml) | Weekly fleet sweep that opens standards-sync PRs for repos drifted off the org-standard workflow stubs |
 
-## Related
+## Related# petry-projects/.github
+
+Organization-wide GitHub configuration and workflows for the `petry-projects` org.
+
+## Contents
+
+| Path | Purpose |
+| ------ | ------- |
+| [`profile/`](profile/) | Public org profile page shown on the org's GitHub landing page |
+| [`standards/`](standards/) | Engineering standards and policy documents |
+| [`standards/workflows/`](standards/workflows/) | Reusable CI workflow templates called by org repositories |
+
+## Engineering Standards
+
+The `standards/` directory contains the authoritative policy documents for this org.
+
+| Standard | Topic | Key topics |
+| -------- | ----- | ---------- |
+| [`advanced-security`](standards/advanced-security.md) | GitHub Advanced Security configuration | Code Security Configurations, push-protection live-fire test (canary), licensing & billing, verification, compliance audit checks |
+| [`agent-rate-limits`](standards/agent-rate-limits.md) | Agent token-budget and rate-limit policy | What is limited, token-budget breaker, daily budget as per-agent cost bound, exempt actors, operator runbook |
+| [`agent-standards`](standards/agent-standards.md) | Copilot and agentic workflow standards | Required files, agent configuration security, AgentShield CI workflow, Decision-Making Reusables, RMAD |
+
 
 The companion repository [`petry-projects/.github-private`](https://github.com/petry-projects/.github-private) holds private automation:
 Copilot custom agents, agentic workflow scripts, installed frameworks, and scheduled CI.
