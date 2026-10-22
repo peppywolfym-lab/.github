@@ -1,0 +1,24 @@
+# Fixture: the #571-broken shape — the reusable `with:` references the `inputs`
+# context. The job `if:` does NOT prevent the reusable call graph from being
+# validated at workflow setup, so on the `discussion` trigger this fails the
+# whole run with zero jobs. lint-caller.sh must flag this (exit 1).
+name: broken caller
+on:
+  workflow_dispatch:
+    inputs:
+      focus_area:
+        required: false
+        type: string
+      target_discussion:
+        required: false
+        type: string
+  discussion:
+    types: [created]
+
+jobs:
+  ideate:
+    if: github.event_name != 'discussion'
+    uses: org/.github/.github/workflows/reusable.yml@v1
+    with:
+      target_discussion: ${{ inputs.target_discussion || '' }}
+      focus_area: ${{ inputs.focus_area || '' }}

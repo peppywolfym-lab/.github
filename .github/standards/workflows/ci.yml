@@ -1,0 +1,125 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/ci.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md#1-ci-pipeline-ciyml
+#
+# ADOPTING THIS WORKFLOW:
+#   1. This ships verbatim into repos created from petry-projects/repo-template.
+#   2. It is a CUSTOMIZE-PER-STACK stub: it passes out of the box so a fresh repo
+#      is green on day 0. Replace the placeholder step with your stack's
+#      lint / format / typecheck / unit-test / coverage steps (see the standard).
+#   3. The job name `build-and-test` is the required CI status check. Keep it — or,
+#      if you split into per-language jobs (e.g. TypeScript, Go, Python), update the
+#      repo's branch-protection required checks to match the new job names.
+#   4. Two more jobs ship by default and are org required checks — `Secret scan
+#      (gitleaks)` (per push-protection.md; needs a .gitleaks.toml at root, seeded
+#      by repo-template tooling) and `coverage` (green until your stack emits coverage).
+#      Keep their job names stable so the required checks stay satisfied.
+#
+# CONVENTIONS (enforced by the standard):
+#   • permissions: {} at top, least-privilege per job (CI needs contents: read)
+#   • triggers: push + pull_request to main
+#   • concurrency keyed by ref+sha so a new push cancels the stale run
+#   • SHA-pin every third-party action (never a tag/branch)
+# ─────────────────────────────────────────────────────────────────────────────
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # ── Replace the step below with your stack's checks ───────────────────────
+      # Standard CI stages: lint, format check, type check, unit tests, coverage
+      # (plus integration / e2e / build where applicable). For example, a Node repo:
+      #   - uses: actions/setup-node@<sha> # vX   (with node-version + cache)
+      #   - run: npm ci
+      #   - run: npm run lint && npm run typecheck && npm test
+      # See BOOTSTRAP.md and the CI standard. Until you add real steps, the
+      # placeholder below keeps the required `build-and-test` check green.
+      - name: Placeholder — replace with real build/test steps
+        run: echo "CI stub — add your stack's lint/format/typecheck/test/coverage steps; see BOOTSTRAP.md."
+
+  # Canonical secret-scan job — copied verbatim from push-protection.md#required-ci-job.
+  # Produces the `Secret scan (gitleaks)` required check. Uses the gitleaks CLI (not
+  # gitleaks/gitleaks-action, whose v2+ needs a paid org license); fully pinned +
+  # checksum-verified; no SARIF upload, so no `security-events: write` permission.
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          # Named GITLEAKS_CHECKSUM (not GITLEAKS_SHA256) — SonarCloud flags env var names
+          # matching *SHA256* containing hex strings as Security Hotspots (false positive).
+          GITLEAKS_CHECKSUM: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          wget -q "${url}" -O /tmp/gitleaks.tar.gz
+          echo "${GITLEAKS_CHECKSUM}  /tmp/gitleaks.tar.gz" | sha256sum -c
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin
+
+      - name: Run gitleaks
+        # Requires a .gitleaks.toml at repo root (seeded by seed-repo-template.sh).
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose --exit-code 1
+
+  # Stack-aware coverage — produces the `coverage` required check. Default stack is
+  # shell/bats via kcov. GREEN-UNTIL-TESTS: when a stack emits no coverage yet, the
+  # job succeeds without producing a report, so seeding it fleet-wide never bricks a
+  # repo that has no test suite. It begins enforcing once tests exist. Add a per-stack
+  # block below (keep the job id and `name:` as `coverage` so the required check is stable).
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Coverage (shell/bats via kcov)
+        run: |
+          shopt -s globstar nullglob
+          bats_files=(tests/**/*.bats)
+          if [ ${#bats_files[@]} -eq 0 ]; then
+            echo "No bats tests found — coverage is green until tests exist."
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats kcov
+          mkdir -p coverage
+          kcov --include-path=. --exclude-path=tests,coverage coverage bats "${bats_files[@]}"
+          echo "Coverage report written to ./coverage"
+
+      # ── Per-stack expansion — replace/augment the shell block above for your stack.
+      #    Keep the job id and `name:` as `coverage` so the required check is unchanged.
+      #    Node:   npx jest --coverage
+      #    Go:     go test ./... -coverprofile=coverage.out && go tool cover -func=coverage.out
+      #    Python: pytest --cov
+      #    Rust:   cargo llvm-cov --workspace

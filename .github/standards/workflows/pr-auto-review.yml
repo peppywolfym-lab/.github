@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/pr-auto-review.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md
+# Reusable:        petry-projects/.github/.github/workflows/pr-auto-review-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All readiness-gate logic lives in the
+#     reusable workflow above.
+#   • You MAY change: the workflow name(s) in `workflow_run.workflows` to match
+#     your repository's CI workflow name(s).
+#   • You MUST NOT change: the `@pr-auto-review/v1-stable` channel in the `uses:`
+#     line — this reusable is on the org-wide moving-channel model (rollout and
+#     rollback are a single central tag move; a frozen `@vN`/`@<sha>` pin is
+#     rejected by the compliance audit). Nor the trigger event types or the
+#     job-level `permissions:` block — reusable workflows can be granted no more
+#     permissions than the calling job, so removing the stanza breaks the
+#     reusable's gh API calls.
+#   • If you need different behaviour, open a PR against the reusable in the
+#     central repo. The change will propagate everywhere on next run.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# PR Auto-Review — thin caller for the org-level reusable.
+# To adopt: copy this file to .github/workflows/pr-auto-review.yml in your repo.
+# Requires: GH_PAT_WORKFLOWS org secret (already present in petry-projects org).
+name: PR Auto-Review — Ready Check
+
+on:
+  # workflow_run fires when a named GitHub Actions workflow completes.
+  # check_suite does NOT trigger for GitHub Actions runs, so this is required
+  # to catch CI turning green on a PR.
+  # TODO: replace "CI" with your repository's CI workflow name(s).
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  # check_suite covers third-party CI checks (e.g. SonarCloud, external apps).
+  check_suite:
+    types: [completed]
+  # Re-evaluate readiness after review state changes.
+  pull_request_review:
+    types: [submitted, dismissed]
+  # Re-evaluate when the PR is first opened, updated, or comes out of draft.
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+# Deduplicate ONLY the default-branch-context triggers (issue #1126). On GitHub
+# Free (20 concurrent jobs, org-wide) this stub fanned out per trigger. Its runs
+# split by context:
+#   • check_suite / workflow_run — head_branch=main, the check does NOT attach to
+#     the PR head, so superseding an in-flight run is SAFE. Both events collapse
+#     onto one group per PR (`…-pr-<number>`) with cancel-in-progress: true.
+#   • pull_request / pull_request_review — run on the PR head; a cancelled run
+#     would leave a cancelled `pr-auto-review / check-and-dispatch` check on the
+#     head. They get a unique-per-run group and never cancel, so they behave
+#     exactly as before.
+# A default-branch trigger with no associated PR (fork / no PR) also falls back to
+# the unique-per-run group so unrelated PRs never collapse into one group.
+concurrency:
+  group: >-
+    ${{
+    (github.event_name == 'check_suite' && github.event.check_suite.pull_requests[0].number)
+    && format('pr-auto-review-ready-check-pr-{0}', github.event.check_suite.pull_requests[0].number)
+    || (github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].number)
+    && format('pr-auto-review-ready-check-pr-{0}', github.event.workflow_run.pull_requests[0].number)
+    || format('pr-auto-review-ready-check-unique-{0}', github.run_id)
+    }}
+  cancel-in-progress: ${{ github.event_name == 'check_suite' || github.event_name == 'workflow_run' }}
+
+jobs:
+  pr-auto-review:
+    permissions:
+      pull-requests: read
+      checks: read
+      actions: read
+    uses: petry-projects/.github/.github/workflows/pr-auto-review-reusable.yml@pr-auto-review/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    secrets:
+      # Canonical-first fallback (.github-private#1326). The reusable resolves this
+      # secret BY NAME, so only the VALUE changes — the passed key stays named
+      # GH_PAT_WORKFLOWS.
+      GH_PAT_WORKFLOWS: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}

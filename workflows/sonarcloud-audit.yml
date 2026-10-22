@@ -1,0 +1,76 @@
+# Weekly org-wide SonarCloud audit.
+#
+# Scans every SonarCloud project in the org, groups open findings per
+# (repo × rule-family workstream), and idempotently creates/updates/closes one
+# GitHub issue per group with dev-lead + priority:<severity> labels. Emits a
+# dashboard to the workflow step summary. Runs Tuesdays around midday US Central,
+# offset from the Friday compliance audit so the two do not contend for the same
+# issue surface.
+#
+# Idempotency, labeling, and lifecycle live in scripts/sonarcloud-audit.sh.
+name: SonarCloud Audit
+
+on:
+  schedule:
+    # 17:15 UTC = 12:15 US Central during CDT (summer). GitHub cron is UTC-only
+    # and does not observe DST, so this lands at 11:15 Central during CST (winter).
+    - cron: '15 17 * * 2'   # Every Tuesday at 17:15 UTC
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Limit to a specific repo (owner/name or name). Leave blank to scan all.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run — scan and report only, skip issue writes'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: sonarcloud-audit
+  cancel-in-progress: false   # let a running audit finish to avoid partial issue state
+
+jobs:
+  audit:
+    name: SonarCloud Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.ORG_SCORECARD_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Checkout .github repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run SonarCloud audit
+        env:
+          ORG: ${{ github.repository_owner }}
+          SONAR_ORG: ${{ github.repository_owner }}
+          REPORT_DIR: ${{ runner.temp }}/sonarcloud-report
+          TARGET_REPO: ${{ inputs.target_repo || '' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          CREATE_ISSUES: 'true'
+        run: bash scripts/sonarcloud-audit.sh
+
+      - name: Write step summary
+        if: always()
+        run: |
+          if [ -f "${{ runner.temp }}/sonarcloud-report/summary.md" ]; then
+            cat "${{ runner.temp }}/sonarcloud-report/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "SonarCloud audit did not produce a summary." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonarcloud-report
+          path: ${{ runner.temp }}/sonarcloud-report/
+          retention-days: 90

@@ -1,0 +1,14 @@
+[
+  {
+    "number": 95,
+    "title": "Old recently closed",
+    "labels": [],
+    "closedAt": "2099-01-01T00:00:00Z"
+  },
+  {
+    "number": 50,
+    "title": "Ancient closed",
+    "labels": [],
+    "closedAt": "2020-01-01T00:00:00Z"
+  }
+]

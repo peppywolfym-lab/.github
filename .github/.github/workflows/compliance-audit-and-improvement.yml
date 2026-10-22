@@ -1,0 +1,623 @@
+# Weekly org-wide compliance audit, health survey, and continuous improvement.
+# Job 1: Deterministic compliance checks against standards (shell script).
+# Job 2: Runtime health survey — CI failures, security alerts, PR staleness.
+# Job 3: Claude analyzes both datasets in six phases:
+#   Phase 1-3: Load data, categorize findings, research root causes.
+#   Phase 4: Evaluate against industry best practices & emerging capabilities.
+#   Phase 5: Create actionable issues per repo (dev-lead label for agent pickup).
+#   Phase 6: Summary report.
+# Standard: https://github.com/${{ github.repository_owner }}/.github/tree/main/standards
+name: Org Standards Compliance Audit
+# readme-report: Weekly org standards compliance audit + runtime health survey, with per-finding remediation issues.
+
+on:
+  schedule:
+    - cron: '57 12 * * 5'   # Every Friday at 12:57 UTC
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Limit to a specific repo (owner/name or name). Leave blank to scan all.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run — audit and survey only, skip issue creation'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: compliance-audit
+  cancel-in-progress: false   # Let running audits finish to avoid partial issue state
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Deterministic compliance checks
+  # Runs the shell script that audits all repos against org standards.
+  # Produces a JSON findings file and markdown summary.
+  # Creates/updates/closes GitHub Issues for each finding.
+  # -----------------------------------------------------------------------
+  audit:
+    name: Compliance Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.ORG_SCORECARD_TOKEN }}
+    outputs:
+      findings_count: ${{ steps.audit.outputs.findings_count }}
+      error_count: ${{ steps.audit.outputs.error_count }}
+      warning_count: ${{ steps.audit.outputs.warning_count }}
+      repos_with_findings: ${{ steps.audit.outputs.repos_with_findings }}
+      issues_added: ${{ steps.audit.outputs.issues_added }}
+      issues_existing: ${{ steps.audit.outputs.issues_existing }}
+      issues_retriggered: ${{ steps.audit.outputs.issues_retriggered }}
+      issues_removed: ${{ steps.audit.outputs.issues_removed }}
+    steps:
+      - name: Checkout .github repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run compliance audit
+        id: audit
+        env:
+          REPORT_DIR: ${{ runner.temp }}/compliance-report
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          CREATE_ISSUES: 'true'
+          # The script is read-only by default (issue #1036, Defect 3). This is
+          # the official audit run, so it is explicitly authorised to mutate org
+          # issue/label state. DRY_RUN still suppresses mutation when dispatched
+          # with dry_run=true.
+          COMPLIANCE_AUDIT_APPLY: 'true'
+        run: |
+          mkdir -p "$REPORT_DIR"
+          bash scripts/compliance-audit.sh --apply
+
+          # Parse outputs for downstream jobs
+          FINDINGS_COUNT=$(jq length "$REPORT_DIR/findings.json")
+          ERROR_COUNT=$(jq '[.[] | select(.severity == "error")] | length' "$REPORT_DIR/findings.json")
+          WARNING_COUNT=$(jq '[.[] | select(.severity == "warning")] | length' "$REPORT_DIR/findings.json")
+          REPOS_WITH_FINDINGS=$(jq '[.[].repo] | unique | length' "$REPORT_DIR/findings.json")
+
+          echo "findings_count=$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
+          echo "error_count=$ERROR_COUNT" >> "$GITHUB_OUTPUT"
+          echo "warning_count=$WARNING_COUNT" >> "$GITHUB_OUTPUT"
+          echo "repos_with_findings=$REPOS_WITH_FINDINGS" >> "$GITHUB_OUTPUT"
+
+          # Parse issue management counts written by the audit script
+          COUNTS_FILE="$REPORT_DIR/issue-counts.json"
+          if [ -f "$COUNTS_FILE" ]; then
+            ISSUES_ADDED=$(jq '.added' "$COUNTS_FILE")
+            ISSUES_EXISTING=$(jq '.existing' "$COUNTS_FILE")
+            ISSUES_RETRIGGERED=$(jq '.retriggered // 0' "$COUNTS_FILE")
+            ISSUES_REMOVED=$(jq '.removed' "$COUNTS_FILE")
+          else
+            ISSUES_ADDED=0; ISSUES_EXISTING=0; ISSUES_RETRIGGERED=0; ISSUES_REMOVED=0
+          fi
+          echo "issues_added=$ISSUES_ADDED" >> "$GITHUB_OUTPUT"
+          echo "issues_existing=$ISSUES_EXISTING" >> "$GITHUB_OUTPUT"
+          echo "issues_retriggered=$ISSUES_RETRIGGERED" >> "$GITHUB_OUTPUT"
+          echo "issues_removed=$ISSUES_REMOVED" >> "$GITHUB_OUTPUT"
+
+      - name: Write step summary
+        if: always()
+        run: |
+          if [ -f "${{ runner.temp }}/compliance-report/summary.md" ]; then
+            cat "${{ runner.temp }}/compliance-report/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Audit script did not produce a summary." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compliance-report
+          path: ${{ runner.temp }}/compliance-report/
+          retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Job 2: Runtime health survey
+  # Collects live CI/Actions, security alerts, PR health, and branch
+  # protection data that the deterministic audit does not cover.
+  # -----------------------------------------------------------------------
+  health-survey:
+    name: CI & Automation Health Survey
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.ORG_SCORECARD_TOKEN }}
+    outputs:
+      report: ${{ steps.collect.outputs.report }}
+      has_findings: ${{ steps.collect.outputs.has_findings }}
+    steps:
+      - name: Collect runtime health telemetry
+        id: collect
+        run: |
+          set -euo pipefail
+
+          ORG="${{ github.repository_owner }}"
+          TARGET_REPO="${{ inputs.target_repo || '' }}"
+          REPORT_FILE=$(mktemp)
+
+          # Get list of repos to scan
+          if [ -n "$TARGET_REPO" ]; then
+            if [[ "$TARGET_REPO" != */* ]]; then
+              TARGET_REPO="$ORG/$TARGET_REPO"
+            fi
+            REPOS="${TARGET_REPO#"$ORG/"}"
+          else
+            REPOS=$(gh repo list "$ORG" --no-archived --limit 100 --json name -q '.[].name')
+          fi
+
+          echo '{"scan_date":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","org":"'"$ORG"'","repos":[]}' > "$REPORT_FILE"
+
+          TOTAL_FINDINGS=0
+
+          for REPO in $REPOS; do
+            FULL_REPO="$ORG/$REPO"
+            echo "::group::Health survey: $FULL_REPO"
+
+            # ── Workflow run failures (last 7 days) ──
+            FAILED_RUNS=$(gh run list --repo "$FULL_REPO" --limit 50 \
+              --json name,status,conclusion,createdAt,event,url \
+              -q '[.[] | select(.conclusion == "failure")]' 2>/dev/null || echo '[]')
+            FAILED_COUNT=$(echo "$FAILED_RUNS" | jq 'length')
+
+            # Deduplicate — latest failure per workflow
+            UNIQUE_FAILURES=$(echo "$FAILED_RUNS" | jq -c '[group_by(.name)[] | sort_by(.createdAt) | last]')
+
+            # ── Open PR health ──
+            OPEN_PRS=$(gh pr list --repo "$FULL_REPO" --state open \
+              --json number,title,author,isDraft,updatedAt,url,createdAt \
+              -q '.' 2>/dev/null || echo '[]')
+            PR_COUNT=$(echo "$OPEN_PRS" | jq 'length')
+
+            # Stale PRs (no update in 7+ days)
+            STALE_PRS=$(echo "$OPEN_PRS" | jq -c '[.[] | select((now - (.updatedAt | fromdateiso8601)) > (7 * 86400))]')
+            STALE_COUNT=$(echo "$STALE_PRS" | jq 'length')
+
+            # ── Live security alerts ──
+            # gh api with --jq outputs error JSON on 403/404 before falling back,
+            # so we must check exit code first to avoid concatenated output.
+            if DEPENDABOT_RAW=$(gh api "repos/$FULL_REPO/dependabot/alerts?state=open" 2>/dev/null); then
+              DEPENDABOT_OPEN=$(echo "$DEPENDABOT_RAW" | jq 'length')
+            else
+              DEPENDABOT_OPEN=0
+            fi
+            if SECRET_RAW=$(gh api "repos/$FULL_REPO/secret-scanning/alerts?state=open" 2>/dev/null); then
+              SECRET_ALERTS=$(echo "$SECRET_RAW" | jq 'length')
+            else
+              SECRET_ALERTS=0
+            fi
+            if CODESCAN_RAW=$(gh api "repos/$FULL_REPO/code-scanning/alerts?state=open" 2>/dev/null); then
+              CODE_SCANNING=$(echo "$CODESCAN_RAW" | jq 'length')
+            else
+              CODE_SCANNING=0
+            fi
+
+            # ── Branch protection status ──
+            if BP_RAW=$(gh api "repos/$FULL_REPO/branches/main/protection" 2>/dev/null); then
+              BRANCH_PROTECTION=$(echo "$BP_RAW" | jq -c '{
+                required_status_checks: (.required_status_checks.contexts // []),
+                enforce_admins: .enforce_admins.enabled,
+                required_reviews: (.required_pull_request_reviews != null)
+              }')
+            else
+              BRANCH_PROTECTION='{"error":"not configured"}'
+            fi
+
+            # ── Workflow inventory ──
+            if WF_RAW=$(gh api "repos/$FULL_REPO/actions/workflows" 2>/dev/null); then
+              WORKFLOWS=$(echo "$WF_RAW" | jq -c '[.workflows[] | {name:.name,state:.state,path:.path}]')
+            else
+              WORKFLOWS='[]'
+            fi
+
+            # ── Open issue summary ──
+            TOTAL_OPEN_ISSUES=$(gh issue list --repo "$FULL_REPO" --state open --json number -q 'length' 2>/dev/null || echo '0')
+
+            # ── Finding score (weighted) ──
+            FINDINGS=0
+            [ "$FAILED_COUNT" -gt 0 ] && FINDINGS=$((FINDINGS + FAILED_COUNT))
+            [ "$DEPENDABOT_OPEN" -gt 0 ] && FINDINGS=$((FINDINGS + DEPENDABOT_OPEN))
+            [ "$SECRET_ALERTS" -gt 0 ] && FINDINGS=$((FINDINGS + SECRET_ALERTS * 5))
+            [ "$CODE_SCANNING" -gt 0 ] && FINDINGS=$((FINDINGS + CODE_SCANNING * 3))
+            [ "$STALE_COUNT" -gt 0 ] && FINDINGS=$((FINDINGS + STALE_COUNT))
+            echo "$BRANCH_PROTECTION" | jq -e '.error' >/dev/null 2>&1 && FINDINGS=$((FINDINGS + 5))
+
+            # ── Append to report ──
+            REPO_JSON=$(jq -n \
+              --arg name "$REPO" \
+              --arg full_name "$FULL_REPO" \
+              --argjson unique_failures "$UNIQUE_FAILURES" \
+              --argjson failed_count "$FAILED_COUNT" \
+              --argjson pr_count "$PR_COUNT" \
+              --argjson stale_count "$STALE_COUNT" \
+              --argjson stale_prs "$STALE_PRS" \
+              --argjson dependabot "$DEPENDABOT_OPEN" \
+              --argjson secrets "$SECRET_ALERTS" \
+              --argjson codescan "$CODE_SCANNING" \
+              --argjson protection "$(echo "$BRANCH_PROTECTION" | jq -c .)" \
+              --argjson workflows "$WORKFLOWS" \
+              --argjson open_issues "$TOTAL_OPEN_ISSUES" \
+              --argjson score "$FINDINGS" \
+              '{
+                name: $name,
+                full_name: $full_name,
+                ci: {unique_failures: $unique_failures, total_failures_7d: $failed_count},
+                prs: {open_count: $pr_count, stale_count: $stale_count, stale_prs: $stale_prs},
+                security: {dependabot_open: $dependabot, secret_scanning_open: $secrets, code_scanning_open: $codescan},
+                branch_protection: $protection,
+                workflows: $workflows,
+                issues: {total_open: $open_issues},
+                finding_score: $score
+              }')
+            jq --argjson repo "$REPO_JSON" '.repos += [$repo]' "$REPORT_FILE" > "${REPORT_FILE}.tmp"
+            mv "${REPORT_FILE}.tmp" "$REPORT_FILE"
+
+            TOTAL_FINDINGS=$((TOTAL_FINDINGS + FINDINGS))
+            echo "::endgroup::"
+          done
+
+          # Outputs
+          HAS_FINDINGS="false"
+          [ "$TOTAL_FINDINGS" -gt 0 ] && HAS_FINDINGS="true"
+          echo "has_findings=$HAS_FINDINGS" >> "$GITHUB_OUTPUT"
+
+          REPORT=$(jq -c . "$REPORT_FILE")
+          echo "report<<REPORT_EOF" >> "$GITHUB_OUTPUT"
+          echo "$REPORT" >> "$GITHUB_OUTPUT"
+          echo "REPORT_EOF" >> "$GITHUB_OUTPUT"
+
+          echo "## Health Survey Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Repos scanned:** $(echo "$REPOS" | wc -w | tr -d ' ')" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Total finding score:** $TOTAL_FINDINGS" >> "$GITHUB_STEP_SUMMARY"
+
+          rm -f "$REPORT_FILE"
+
+  # -----------------------------------------------------------------------
+  # Job 3: Combined analysis — Claude reviews both datasets
+  # Creates actionable issues in the appropriate repo with the dev-lead label.
+  # -----------------------------------------------------------------------
+  analyze:
+    name: Analyze & Create Issues (Claude)
+    needs: [audit, health-survey]
+    if: always() && (needs.audit.result == 'success' || needs.health-survey.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout .github repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download compliance audit report
+        if: needs.audit.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: compliance-report
+          path: ${{ runner.temp }}/compliance-report
+
+      - name: Write health survey report
+        if: needs.health-survey.result == 'success'
+        run: |
+          cat <<'REPORT_EOF' > ${{ runner.temp }}/health-survey.json
+          ${{ needs.health-survey.outputs.report }}
+          REPORT_EOF
+
+      - name: Run Claude Code for combined analysis
+        env:
+          GH_TOKEN: ${{ secrets.ORG_SCORECARD_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the **Org Standards Compliance Auditor** for the **${{ github.repository_owner }}** GitHub organization.
+            Two data collection jobs have completed. Your job is to analyze both datasets together,
+            identify problems and automation gaps, and create actionable GitHub issues.
+
+            ## Environment
+
+            - Org: ${{ github.repository_owner }}
+            - Dry run: $DRY_RUN (if "true", write analysis to step summary but do not create issues)
+            - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ## Data Sources
+
+            ### Compliance Audit (deterministic policy checks)
+            - Findings JSON: ${{ runner.temp }}/compliance-report/findings.json
+            - Summary report: ${{ runner.temp }}/compliance-report/summary.md
+            - Findings: ${{ needs.audit.outputs.findings_count }} total
+            - Errors: ${{ needs.audit.outputs.error_count }}
+            - Warnings: ${{ needs.audit.outputs.warning_count }}
+            - Repos with findings: ${{ needs.audit.outputs.repos_with_findings }}
+            - Issues added (new): ${{ needs.audit.outputs.issues_added }}
+            - Issues existing (updated): ${{ needs.audit.outputs.issues_existing }}
+            - Issues re-triggered (dev-lead re-engaged on persistent findings): ${{ needs.audit.outputs.issues_retriggered }}
+            - Issues removed (resolved): ${{ needs.audit.outputs.issues_removed }}
+
+            ### Health Survey (runtime telemetry)
+            - Report JSON: ${{ runner.temp }}/health-survey.json
+            - Covers: CI run failures, security alerts (Dependabot/secret/code scanning), PR staleness, branch protection, workflow inventory
+
+            ## Phase 1: Load and Understand
+
+            1. Read both data files
+            2. Read the org standards:
+               - `standards/ci-standards.md`
+               - `standards/github-settings.md`
+               - `standards/dependabot-policy.md`
+               - `standards/agent-standards.md`
+               - `AGENTS.md`
+            3. List existing open issues across all org repos to avoid duplicates:
+               ```bash
+               gh search issues --owner ${{ github.repository_owner }} --state open --limit 100 --json repository,title,number,labels
+               ```
+
+            ## Phase 2: Analyze and Categorize
+
+            Correlate compliance findings with health data. For example:
+            - A repo missing a required workflow (compliance) AND having CI failures (health) = higher priority
+            - A repo with open secret scanning alerts (health) + missing security labels (compliance) = systemic gap
+
+            Categorize by severity:
+
+            ### Critical
+            - Secret scanning alerts (exposed credentials)
+            - CI failures on main branch (blocks all work)
+            - Missing branch protection on governance repos
+
+            ### High
+            - Open Dependabot/code scanning alerts
+            - Broken automation (workflows erroring on missing secrets, config conflicts)
+            - Compliance errors (missing required workflows, unpinned actions)
+
+            ### Medium
+            - Stale PRs (no update 7+ days)
+            - Systematic CI failures across repos (same pattern)
+            - Compliance warnings
+
+            ### Low / Improvement Opportunities
+            - Missing optional workflows
+            - Automation ideas to prevent recurring findings
+            - Documentation gaps
+
+            ## Phase 3: Research and Ideation
+
+            For each finding:
+            - Correlate compliance + health data to identify root causes
+            - Think about automation that could prevent recurrence:
+              - Shared workflow templates?
+              - GitHub App or bot?
+              - Policy-as-code enforcement?
+              - Org-level settings?
+            - Group related findings into single issues (e.g., "same workflow failing in 5 repos" = 1 issue)
+
+            ## Phase 4: Industry Best Practices & Emerging Capabilities
+
+            Step back from the immediate findings and evaluate the org's practices against
+            the broader landscape of modern software development — particularly where agentic
+            AI development, AI-assisted CI/CD, and autonomous code agents are reshaping what
+            "world-class" looks like.
+
+            Research and assess the org against these dimensions:
+
+            ### Security & Supply Chain Integrity
+            - Are we using artifact attestation and SLSA provenance for build outputs?
+            - Do we have SBOM generation integrated into CI?
+            - Are we leveraging GitHub push protection and custom secret scanning patterns?
+            - Is there a dependency review enforcement (beyond Dependabot alerting)?
+            - Are we signing commits or enforcing Sigstore/gitsign?
+
+            ### Agentic Development Guardrails
+            - Do our agent workflows (Claude Code Action, etc.) have appropriate sandboxing
+              and permission boundaries?
+            - Is there an audit trail for agent-authored changes (attribution, traceability)?
+            - Do we have policy gates that prevent agents from merging without human review?
+            - Are agent-created PRs distinguishable and held to the same (or stricter) review standards?
+            - Is there a feedback loop where agent failures inform improved agent instructions?
+
+            ### Reliability & Predictability
+            - Are we tracking CI flakiness (not just failures)?
+            - Do we have workflow-level SLOs (e.g., "CI completes in < 10 min, 95th percentile")?
+            - Is there automated rollback or canary deployment capability?
+            - Are critical workflows idempotent and resilient to transient failures?
+            - Do we have structured error budgets or quality gates that adapt to repo maturity?
+
+            ### Developer Experience & Velocity
+            - Is PR cycle time being measured? What's the median time-to-merge?
+            - Are there bots or automations that reduce toil (auto-labeling, stale PR closing,
+              changelog generation, release drafting)?
+            - Is the inner dev loop fast — do developers get feedback in < 5 minutes?
+            - Are shared workflow templates versioned and tested before rollout?
+
+            ### Observability & Continuous Improvement
+            - Is there a dashboard or periodic report tracking org-wide CI health over time?
+            - Can we detect regressions in security posture, test coverage, or build times week-over-week?
+            - Are we capturing metrics that feed back into standards evolution?
+
+            For each gap or opportunity identified:
+            - Assess **feasibility** (can we implement this with GitHub-native tools, or does it
+              require third-party integrations?)
+            - Assess **impact** (does this prevent real incidents, or is it theoretical hygiene?)
+            - Assess **urgency** (is the ecosystem moving here now, or is this forward-looking?)
+            - Only propose items scoring high on at least two of these three dimensions
+
+            **Do NOT create implementation issues from this phase.** Phase 4 output is
+            exclusively **proposed new or improved standards** for the org. For each top
+            opportunity (max 2-3), create a standards proposal issue in `${{ github.repository_owner }}/.github`:
+            - Title: `Standards: <concise description of the proposed standard>`
+            - Labels: `dev-lead,enhancement`
+            - Body must include:
+              - **Proposed Standard** — the specific policy, workflow, or configuration to adopt
+              - **Rationale** — why this matters, linked to the feasibility/impact/urgency assessment
+              - **Current Gap** — what the org does today vs. what the standard would require
+              - **Implementation Path** — concrete steps to codify this into `standards/` docs
+                and shared workflow templates
+            These are proposals for human review, not directives to implement.
+
+            ## Phase 5: Create Issues
+
+            **IMPORTANT RULES for issue placement:**
+            - Issues specific to a single repo MUST be created in that repo (e.g., `${{ github.repository_owner }}/broodly`)
+            - Issues affecting multiple repos or org-wide concerns go in `${{ github.repository_owner }}/.github`
+            - Standards improvement proposals go in `${{ github.repository_owner }}/.github`
+
+            **IMPORTANT: Every issue MUST have the `dev-lead` label** so it gets picked up for implementation.
+            Ensure the `dev-lead` label exists in the target repo before creating the issue:
+            ```bash
+            gh label create dev-lead --repo ${{ github.repository_owner }}/<repo> --color "8B5CF6" --description "For dev-lead agent pickup" 2>/dev/null || true
+            ```
+
+            Additional labels by type: `bug`, `security`, `ci`, `automation`, `enhancement`, `documentation`
+            Create any missing labels before use:
+            ```bash
+            gh label create <name> --repo ${{ github.repository_owner }}/<repo> --color "<hex>" 2>/dev/null || true
+            ```
+
+            **Issue creation:**
+            ```bash
+            gh issue create --repo ${{ github.repository_owner }}/<target-repo> \
+              --title "<severity prefix>: <concise title>" \
+              --label "dev-lead,<other-labels>" \
+              --body "<structured body>"
+            ```
+
+            **Title prefixes:** CRITICAL (critical), fix (high/medium), enhancement (low/improvements)
+
+            **Issue body structure:**
+            ```markdown
+            ## Summary
+            <1-2 sentence description>
+
+            ## Evidence
+            <data from audit and/or health survey — failed runs, alert counts, compliance findings>
+
+            ## Root Cause Analysis
+            <what's causing this and why — correlate compliance + health data>
+
+            ## Recommended Actions
+            <numbered list of specific, actionable steps>
+
+            ## Automation Opportunity
+            <how this could be prevented or auto-remediated>
+
+            ## Context
+            Identified by Org Standards Compliance Audit on <date>.
+            Audit run: <link to workflow run>
+            ```
+
+            **Deduplication:**
+            - Check existing open issues before creating
+            - **Group findings of the same type across repos into a single issue.** For example,
+              if the same compliance check is failing in 5 repos, create ONE issue listing all
+              affected repos — not 5 separate issues. The compliance audit script already creates
+              per-repo issues; your job is to identify systemic patterns and create higher-level
+              issues for them.
+            - If a similar issue exists, add a comment with latest findings instead
+            - When commenting on existing issues, also ensure the `dev-lead` label is present:
+              ```bash
+              gh issue edit <number> --repo ${{ github.repository_owner }}/<repo> --add-label dev-lead
+              ```
+
+            **Before writing the Phase 6 summary**, gather linked PR data for all issues you
+            created or updated this run, and for all compliance issues from the audit:
+            ```bash
+            gh search prs --owner ${{ github.repository_owner }} --state open \
+              --json number,repository,url,closingIssuesReferences --limit 300
+            ```
+            Store this PR data to populate the "Related PRs" column in the summary.
+
+            ## Phase 6: Summary Report
+
+            Write to $GITHUB_STEP_SUMMARY:
+
+            ```markdown
+            ## Org Standards Compliance Audit Report
+
+            **Date:** <date>
+            **Repos scanned:** N
+
+            ### Compliance Summary
+            | Metric | Count |
+            |--------|-------|
+            | Total findings | N |
+            | Errors | N |
+            | Warnings | N |
+
+            ### Health Summary
+            | Metric | Count |
+            |--------|-------|
+            | CI failures (7d) | N |
+            | Open security alerts | N |
+            | Stale PRs | N |
+            | Repos without branch protection | N |
+
+            ### Issues Created/Updated
+            | Action | Count |
+            |--------|-------|
+            | Added (new) | ${{ needs.audit.outputs.issues_added }} |
+            | Existing (updated) | ${{ needs.audit.outputs.issues_existing }} |
+            | Re-triggered (dev-lead re-engaged) | ${{ needs.audit.outputs.issues_retriggered }} |
+            | Removed (resolved) | ${{ needs.audit.outputs.issues_removed }} |
+
+            Group by compliance issue type — one subsection per distinct check/finding type,
+            listing every affected repo with a linked issue number and any related open PRs.
+            Render each issue and PR as a markdown hyperlink. For example:
+
+            #### `<check-type>` (`<severity>`)
+            _N repos affected_
+
+            | Repo | Issue | Related PRs |
+            |------|-------|-------------|
+            | [repo-name](https://github.com/owner/repo) | [#42 — Compliance: check-type](issue-url) | [#7](pr-url) |
+            | [other-repo](https://github.com/owner/repo) | [#18 — Compliance: check-type](issue-url) | — |
+
+            Repeat for each distinct check type, errors before warnings, sorted alphabetically
+            within each severity group.
+
+            For issues you created in Phase 5 (health/automation/best-practice issues):
+            list them after compliance issues under a sub-heading "#### Phase 5 Issues".
+            Format: `[#N — Title](url)` grouped by repo, with Related PRs where found.
+
+            ### Per-Repo Scorecard
+            | Repo | Compliance | CI | Security | PRs | Protection | Score |
+            |------|-----------|-----|----------|-----|------------|-------|
+            | ... | ... | ... | ... | ... | ... | ... |
+
+            ### Top Automation Improvement Opportunities
+            1. <opportunity> — estimated impact: <high/medium/low>
+
+            ### Industry Best Practices & Emerging Capabilities
+            | Opportunity | Feasibility | Impact | Urgency | Issue |
+            |-------------|-------------|--------|---------|-------|
+            | ... | high/med/low | high/med/low | high/med/low | #N |
+
+            ---
+            *Generated by the [Org Standards Compliance Audit](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+            ```
+
+            ## Rules
+
+            - **Do not fix code or push changes.** Analysis and issue creation only.
+            - **Do not close or modify existing issues** beyond adding the `dev-lead` label.
+            - **Do not create PRs.** Only create issues with actionable recommendations.
+            - **Every issue gets the `dev-lead` label.** No exceptions.
+            - **Repo-specific issues go in that repo.** Org-wide issues go in `.github`.
+            - **Be specific.** Include run IDs, URLs, and exact error messages.
+            - **Deduplicate aggressively.** One well-written issue beats five vague ones.
+            - **Max 3 new standards-improvement issues per run** to avoid noise.
+            - **Max 3 new best-practices/emerging-capabilities issues per run** (Phase 4).
+              These must score high on at least 2 of: feasibility, impact, urgency.
+            - **Post a summary notification issue** in `${{ github.repository_owner }}/.github` titled
+              "Org Standards Compliance Audit Summary — YYYY-MM-DD" with label `compliance-audit`.
+              Do NOT close previous summary issues.
+            - **If dry run is enabled**, write the full analysis but skip all issue creation.

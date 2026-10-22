@@ -1,0 +1,379 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Canary Rollout — ring-staged, health-gated promotion of agent releases by moving
+# channel tags only. Initiative #495 · issues #501 (promotion) / #502 (rollback).
+# Gate standard: .github#548 (graduated dwell/sample, robust baseline, per-candidate
+# window, ring0 sample waiver, failure triage) — see scripts/canary-rollout.sh.
+#
+# The ONLY mutation this performs is moving a channel tag via a `gh api` ref update
+# (PATCH/POST repos/<host>/git/refs/tags/… — NOT a local `git push`, which the
+# release-channel-tags ruleset would reject) and recording a GitHub Deployment for
+# traceability. It never writes consumer files.
+#
+# Auth: the mover credential is a GitHub App installation token minted at runtime via
+# actions/create-github-app-token from RELEASE_MANAGER_APP_CLIENT_ID (variable) + RELEASE_MANAGER_APP_KEY (secret) (scoped,
+# rotatable, auditable) — NOT a raw PAT and NOT github.token.
+#
+# REQUIRED release-manager App repository permissions (set BOTH on the App AND
+# requested in the token-mint step — `create-github-app-token` restricts the minted
+# token to exactly the `permission-*` it lists, so a grant the step doesn't request
+# is silently absent):
+#   • Contents:  write  — tag moves / annotated-tag creation on the host repos.
+#   • Workflows: write  — REQUIRED to move a channel tag on a repo whose HEAD touches
+#                         `.github/workflows/**`. GitHub blocks an App without it from
+#                         creating/updating such a tag; via the git-refs API this
+#                         surfaces as 403 "Resource not accessible by integration"
+#                         (NOT a ruleset error). The `.github` repo is all reusable
+#                         workflows, so EVERY promotion there needs it (#807; broke the
+#                         fleet 2026-07-13..07-19 while only Contents:write was granted).
+#   • Deployments: write — the promotion Deployment record.
+#   • Issues:    write  — the per-agent blocker issues in sync-issues (fleet-status
+#                         table goes to the job summary, not an issue).
+#   • Actions:   read   — the gate reads workflow-run history across every tier repo.
+#   • Metadata:  read.
+# The App must also be a bypass actor on each host repo's `release-channel-tags`
+# ruleset (that gate is separate from, and insufficient without, the perms above).
+# Minting
+# is a HARD requirement: if the token cannot be minted the job fails — it must not
+# silently degrade to github.token, which cannot move protected `.github` tags (#868).
+#
+#   - schedule (every 4h): the ordering is autocut → promote-all → sync-issues.
+#     FIRST `autocut` (#1069) — the FRONT END that closes the last manual seam: gated by the
+#     org variable CANARY_AUTO_CUT (the single kill-switch), it cuts a new <agent>/vX.Y.Z +
+#     moves `next` whenever a registered reusable's blob on its host main HEAD differs from the
+#     current `next` candidate, seeding the soak/promote pipeline with no manual cut-release.sh.
+#     A freshly cut candidate SOAKS the same tick (dwell=0 < floor). It is best-effort — a
+#     failure here never fails the run. THEN the gated fleet auto-promote (#1045 part b). When the org
+#     variable CANARY_AUTO_PROMOTE == 'true' the timer runs `promote-all` — the gate
+#     advances each PROMOTE-ready agent one ring per run and leaves BLOCKED/REGRESSION
+#     agents untouched (human approval is OVERRIDE-ONLY, never a required gate). When the
+#     variable is unset/false it runs read-only `evaluate-all` — evaluates EVERY agent in
+#     canary-rings.json (fleet-wide, #1025 P1) and emits each one's per-version gate +
+#     health report (#502 observability). The arm variable is the single kill-switch.
+#     After promoting, the timer also runs `sync-issues`: it upserts one tracked issue per
+#     BLOCKED agent (failing-run evidence attached; REGRESSION → needs-human; auto-closed on
+#     clear) and renders the whole-fleet status table into the run's job summary (auto-triage).
+#   - workflow_dispatch: `evaluate` | `evaluate-all` | `promote` | `promote-all` |
+#     `rollback` | `sync-issues`, human-gated (promote/promote-all/sync-issues default to --dry-run).
+# ─────────────────────────────────────────────────────────────────────────────
+name: Canary Rollout
+
+on:
+  schedule:
+    - cron: "33 */4 * * *"   # every 4 hours at :33 — autocut → promote-all → sync-issues
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "autocut (gated cut+seed) | evaluate | evaluate-all (read-only) | promote | promote-all (gated tag move) | rollback | sync-issues | drift (read-only registry audit)"
+        type: choice
+        options: [autocut, evaluate, evaluate-all, promote, promote-all, rollback, sync-issues, drift]
+        default: evaluate
+      agent:
+        # This list MUST equal `.agents | keys` in standards/canary-rings.json so every
+        # REGISTERED agent is dispatchable by hand (#1019). Agreement is asserted by the
+        # "the agent choice list agrees with the registry" test in tests/canary_rollout.bats —
+        # when a new agent is registered, add it here or that gate fails. Keep alphabetical.
+        description: "agent to act on"
+        type: choice
+        options:
+          - add-to-project
+          - agent-shield
+          - apply-repo-settings
+          - auto-rebase
+          - ci-failure-analyst
+          - dependabot-automerge
+          - dependabot-rebase
+          - dependency-audit
+          - dev-lead
+          - feature-ideation
+          - idea-enhancer
+          - idea-triage
+          - initiative-planner
+          - persona-mention
+          - pr-auto-review
+          - pr-review
+          - pr-review-mention
+        default: dev-lead
+      override:
+        description: "promote: advance even if the gate is not PROMOTE (records a warning)"
+        type: boolean
+        default: false
+      confirm:
+        description: >-
+          promote: clear an AWAITING_CONFIRMATION hold at a require_confirmation ring boundary
+          (#668 Layer 3). This is the human go/no-go — NOT --override: it advances only a
+          reliability-clean state and cannot bypass a failing gate.
+        type: boolean
+        default: false
+      dry_run:
+        description: "promote/rollback: show the tag move but do not push"
+        type: boolean
+        default: true
+      ring:
+        description: "rollback: which ring channel to move (e.g. ring1, stable)"
+        type: string
+        default: ""
+      to:
+        description: "rollback: target immutable release (e.g. v1.3.0)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # Scheduled runs evaluate the whole fleet (read-only), so they group under 'fleet'
+  # and never serialize behind a per-agent promote/rollback dispatch (#1025 P1).
+  group: canary-rollout-${{ github.event.inputs.agent || 'fleet' }}
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    # The scheduled fleet sweep's runtime grows with the fleet (the gate reads
+    # run-history owner-wide across every tier repo). Observed p50 877s / p95 988s
+    # sat right at the old 15-min (900s) ceiling, so the tail of each sweep was
+    # being killed at the timeout (#939). 30 min keeps durable headroom over p95
+    # while still bounding a genuine hang.
+    timeout-minutes: 30
+    steps:
+      # Mint a scoped GitHub App installation token (Contents/Deployments:write,
+      # Actions/Metadata:read). owner-wide so the gate can read run history across all
+      # tier repos and move tags on the host repos. This step FAILS the job if the App
+      # id/key secrets are missing or the token cannot be minted — no silent fallback.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          # client-id (not the deprecated app-id, #1025 P3). This is the App's client ID,
+          # a distinct value from the numeric app id — set vars.RELEASE_MANAGER_APP_CLIENT_ID.
+          client-id: ${{ vars.RELEASE_MANAGER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_MANAGER_APP_KEY }}
+          # owner-wide (NOT a fixed repositories: list). The fleet gate reads run history
+          # across every tier repo, including the stable-tier '*' member (all consumers),
+          # which cannot be enumerated — so scoping to a repo list would break the gate (#1025 P3).
+          owner: ${{ github.repository_owner }}
+
+      - name: Verify App token was minted (hard requirement)
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_TOKEN}" ]; then
+            echo "::error::Canary rollout requires a GitHub App token" \
+              "(RELEASE_MANAGER_APP_CLIENT_ID (variable) + RELEASE_MANAGER_APP_KEY (secret))." \
+              "Refusing to fall back to github.token, which cannot move protected .github channel tags (#868)."
+            exit 1
+          fi
+
+      # Mint a SECOND, repo-scoped installation token for the tag WRITES only (#745). The
+      # owner-wide token above is refused the release-channel-tags ruleset bypass on a
+      # protected channel-tag PATCH — 403 "Resource not accessible by integration": GitHub
+      # evaluates an App's bypass/effective-permissions differently for an owner-level token
+      # than for a repo-scoped installation token. This token is scoped to just the two
+      # tag-host repos (every agent's registry host is .github or .github-private) with an
+      # explicit Contents:write, and is passed to the engine as CANARY_WRITE_TOKEN so ONLY
+      # _gh_move_tag / _gh_create_annotated_tag use it — the fleet gate's cross-repo
+      # run-history reads keep the owner-wide token (don't regress the '*' stable-tier
+      # enumeration). Not a hard requirement to verify separately: if the write token is
+      # empty the engine falls back to the owner-wide token and the move re-fails loudly.
+      # Confirmed by #744's un-suppressed error (run 29435711407): the owner-wide-token
+      # PATCH .../git/refs/tags/<channel-tag> returned 403 "Resource not accessible by
+      # integration" while an admin-token PATCH of the same ref succeeded.
+      - name: Mint repo-scoped write token (tag moves)
+        id: write-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_MANAGER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_MANAGER_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Scope to exactly the tag-host repos (NOT owner-wide) and request Contents:write
+          # explicitly — this is the combination that carries the ruleset bypass for a
+          # protected channel-tag UPDATE.
+          repositories: |
+            .github
+            .github-private
+          permission-contents: write
+          # workflows:write is REQUIRED to move a channel tag on a repo whose HEAD touches
+          # .github/workflows/** — GitHub refuses an App without it ("Resource not accessible
+          # by integration", surfacing the "create/update workflow without workflows permission"
+          # block via the git-refs API). The `.github` repo is all reusable workflows, so every
+          # promotion there tripped it. `create-github-app-token` restricts the token to the
+          # permissions requested here, so this MUST be listed even though the App now grants it.
+          permission-workflows: write
+
+      - name: Checkout (with tags)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          # Tag moves go through `gh api` with the App token (GH_TOKEN env), never a
+          # local `git push`, so the checkout credential is only needed to authenticate
+          # the fetch — don't persist it into .git/config (narrows the exposure surface).
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+
+      # FRONT END (#1069): cut a new candidate + move `next` whenever a registered reusable's
+      # blob on its host main HEAD differs from the current `next` candidate. Runs FIRST on the
+      # scheduled tick (before promote-all) so a freshly cut candidate begins soaking the same
+      # tick. Gated by CANARY_AUTO_CUT (the single kill-switch) — the script no-ops unless it is
+      # 'true'. Best-effort: a cut/detection hiccup must never fail the scheduled promotion run.
+      - name: Autocut new candidates (front end)
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Repo-scoped write token for the inline cut's tag writes (_gh_create_annotated_tag
+          # + _gh_move_tag). The owner-wide GH_TOKEN above stays the credential for reads (#745).
+          CANARY_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
+          CANARY_AUTO_CUT: ${{ vars.CANARY_AUTO_CUT }}
+        run: |
+          set -uo pipefail
+          bash scripts/canary-rollout.sh autocut || echo "::warning::autocut failed (non-fatal)"
+
+      - name: Run canary-rollout
+        id: run
+        env:
+          # autocut kill-switch — honored when a dispatch runs `autocut` (the script no-ops unless 'true').
+          CANARY_AUTO_CUT: ${{ vars.CANARY_AUTO_CUT }}
+          # On the 4h timer the arm variable decides: CANARY_AUTO_PROMOTE=='true' runs the
+          # gated fleet auto-promote (promote-all, #1045 part b); anything else runs read-only
+          # fleet-wide evaluate-all (#1025 P1). Either way EVERY registry agent is covered, not
+          # just dev-lead. The gate — not the schedule — decides which agents actually advance.
+          CMD: ${{ github.event_name == 'schedule' && (vars.CANARY_AUTO_PROMOTE == 'true' && 'promote-all' || 'evaluate-all') || github.event.inputs.command }}
+          AGENT: ${{ github.event.inputs.agent || 'dev-lead' }}
+          OVERRIDE: ${{ github.event.inputs.override }}
+          # Human go/no-go at a require_confirmation ring boundary (#668 Layer 3). Only meaningful
+          # on a `promote` dispatch — the scheduled sweep never sets it, so AWAITING_CONFIRMATION
+          # holds until a human deliberately confirms.
+          CONFIRM: ${{ github.event.inputs.confirm }}
+          # Scheduled promote-all is a REAL move (DRY_RUN=false); dispatch honours the input
+          # (which defaults to true — dispatch promote/promote-all are dry unless set false).
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run }}
+          RING: ${{ github.event.inputs.ring }}
+          TO: ${{ github.event.inputs.to }}
+          # The inline autocut cut (create+move tags on each agent's host) and the gate's
+          # cross-repo run-history reads both authenticate with the App token.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Repo-scoped write token used ONLY for the channel-tag PATCH/POST in _gh_move_tag /
+          # _gh_create_annotated_tag (promote-all's real moves). Reads/gate keep GH_TOKEN (#745).
+          CANARY_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
+          # One TSV line per real promotion (agent, ring, sha, owning-repo) so the deployment
+          # step records a deployment for EVERY move in a promote-all run, on the right host.
+          CANARY_PROMOTIONS_LOG: ${{ runner.temp }}/promotions.tsv
+          # Sibling log of FAILED tag writes (agent, ring, sha, host, reason) — an UNEXPECTED
+          # write rejection, distinct from an expected gate-block (#1023 defect 2). The
+          # sync-promotion-failures step below turns a repeatedly-failing write into a durable,
+          # escalating tracking issue instead of a scrolling run-log line.
+          CANARY_PROMOTIONS_FAILED_LOG: ${{ runner.temp }}/promotions-failed.tsv
+        run: |
+          set -euo pipefail
+          args=()
+          case "$CMD" in
+            autocut)                                           # gated cut+seed of new candidates (#1069)
+              args=(autocut)
+              [ "$DRY_RUN" != "false" ] && args+=(--dry-run)   # default-safe: dry unless explicitly false
+              ;;
+            evaluate)     args=(evaluate "$AGENT") ;;
+            evaluate-all) args=(evaluate-all) ;;   # fleet-wide read-only (the 4h timer, #1025 P1)
+            promote)
+              args=(promote "$AGENT")
+              [ "$OVERRIDE" = "true" ] && args+=(--override)
+              [ "$CONFIRM" = "true" ] && args+=(--confirm)     # human go/no-go for AWAITING_CONFIRMATION (#668 Layer 3)
+              [ "$DRY_RUN" != "false" ] && args+=(--dry-run)   # default-safe: dry unless explicitly false
+              ;;
+            promote-all)                                       # gated fleet auto-promote (the SCHEDULED arm, #1045b)
+              args=(promote-all)
+              [ "$OVERRIDE" = "true" ] && args+=(--override)
+              [ "$DRY_RUN" != "false" ] && args+=(--dry-run)   # default-safe: dry unless explicitly false
+              ;;
+            rollback)
+              if [ -z "$RING" ] || [ -z "$TO" ]; then echo "::error::rollback needs ring + to"; exit 2; fi
+              args=(rollback "$AGENT" "$RING" --to "$TO")
+              [ "$DRY_RUN" != "false" ] && args+=(--dry-run)
+              ;;
+            sync-issues)                                       # upsert blocker issues + dashboard (auto-triage)
+              args=(sync-issues)
+              [ "$DRY_RUN" != "false" ] && args+=(--dry-run)   # default-safe: dry unless explicitly false
+              ;;
+            drift) args=(drift) ;;                             # read-only registry/host reusable audit (#1082)
+            *) echo "::error::unknown command: $CMD"; exit 2 ;;
+          esac
+          echo "::notice::canary-rollout ${args[*]}"
+          bash scripts/canary-rollout.sh "${args[@]}"
+
+      # Record a GitHub Deployment per real (non-dry-run) promotion — traceability for the
+      # tag moves (#502). Reads the promotions log so a promote-all run records EVERY move,
+      # each on the repo that owns the moved commit (a cross-repo agent's SHA lives on its
+      # host, not GITHUB_REPOSITORY — creating it there 422s "No ref found", #1059).
+      # always() + best-effort per line: a traceability hiccup must never mark a SUCCESSFUL
+      # tag move as a failed run.
+      - name: Record deployment for promotions
+        if: always() && hashFiles(format('{0}/promotions.tsv', runner.temp)) != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CANARY_PROMOTIONS_LOG: ${{ runner.temp }}/promotions.tsv
+        run: |
+          set -uo pipefail
+          while IFS=$'\t' read -r agent ring sha repo; do
+            [ -z "${agent:-}" ] && continue
+            echo "recording deployment: ${agent}/${ring} -> ${sha:0:12} on ${repo}"
+            gh api -X POST "repos/${repo}/deployments" --input - <<JSON || echo "::warning::deployment record failed for ${agent}/${ring} on ${repo} (tag move already succeeded)"
+          {
+            "ref": "${sha}",
+            "environment": "canary-${agent}-${ring}",
+            "auto_merge": false,
+            "required_contexts": [],
+            "transient_environment": false,
+            "production_environment": false,
+            "description": "canary-rollout promoted ${agent}/${ring} -> ${sha}"
+          }
+          JSON
+          done < "${CANARY_PROMOTIONS_LOG}"
+
+      # Auto-triage: turn the gate's BLOCKED verdicts into tracked work + a fleet readout.
+      # From the post-promotion fleet state: (1) upsert ONE idempotent issue per BLOCKED agent
+      # (failing-run evidence pre-attached; REGRESSION → needs-human; auto-closed on clear), and
+      # (2) render the whole-fleet status table into THIS run's job summary (a read-only
+      # snapshot — no dashboard issue, no Issues:write needed for it). Best-effort + always():
+      # a GitHub-side hiccup must never fail the promotion run. The blocker ISSUES need the App
+      # to carry Issues:write — if absent that part warns and continues; the summary still renders.
+      - name: Sync blocker issues + fleet-status summary
+        if: always() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          bash scripts/canary-rollout.sh sync-issues || echo "::warning::issue sync failed (non-fatal)"
+
+      # Escalate FAILED tag writes (#1023 defect 2). A gate-blocked promotion is expected and
+      # tracked by the step above; a rejected tag WRITE is UNEXPECTED and, before this, left only
+      # a run-log line. Reconcile this run's success/failure logs into a durable per-agent
+      # tracking issue whose consecutive-failure streak escalates to needs-human + dev-lead, and
+      # auto-closes when a write recovers. Best-effort + always(): promote-all returns non-zero
+      # when an agent's write failed, so this must run even after that step "fails".
+      - name: Escalate failed promotion tag-writes
+        if: always() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_REPO: ${{ github.repository }}
+          CANARY_PROMOTIONS_LOG: ${{ runner.temp }}/promotions.tsv
+          CANARY_PROMOTIONS_FAILED_LOG: ${{ runner.temp }}/promotions-failed.tsv
+        run: |
+          set -uo pipefail
+          bash scripts/canary-rollout.sh sync-promotion-failures || echo "::warning::promotion-failure escalation failed (non-fatal)"
+
+      # Reusable-registry drift audit (#1082): the registry (.agents{}) is the MANUAL source
+      # of truth for what this pipeline manages — a *-reusable.yml added/renamed on a host but
+      # never registered ships with ZERO staged rollout (no cut/soak/gate/dashboard) until a
+      # human registers it. This read-only step scans every host's .github/workflows for
+      # *-reusable.yml, diffs against the registry, and surfaces (a) unregistered reusables and
+      # (b) stale registry entries whose file is gone — as ::warning:: annotations + a job-summary
+      # table, within one scheduled cycle. Report-only (never registers anything). Best-effort +
+      # always(): a drift-scan hiccup must never fail the promotion run.
+      - name: Reusable-registry drift audit
+        if: always() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          bash scripts/canary-rollout.sh drift || echo "::warning::drift audit failed (non-fatal)"

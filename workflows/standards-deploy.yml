@@ -1,0 +1,71 @@
+# Scheduled fleet sweep that brings every org repo up to the standard workflow
+# stubs — the automation the compliance audit was missing (petry-projects/.github#851).
+#
+# The audit only *files* remediation issues; it never deploys. This workflow runs
+# scripts/deploy-standard-workflows.sh across the fleet on the org cadence (and on
+# demand), opening `standards-sync` PRs wherever a repo drifts — a missing required
+# stub, or a stub pinned off its agent's current channel. Compliant repos open
+# nothing (the deploy script is idempotent), and SKIP_REPOS / SKIP_OVERRIDES are
+# respected by the script. This is a driver, not a reimplementation: all deploy
+# logic lives in the script and its libs.
+#
+# Pairs with #850-B (auto-merge) so the sweep -> PR -> merge loop closes with no
+# manual intervention.
+name: Standards Deploy
+# readme-report: Weekly fleet sweep that opens standards-sync PRs for repos drifted off the org-standard workflow stubs.
+
+on:
+  schedule:
+    - cron: '16 8 * * 1'   # Every Monday at 08:16 UTC — offset from the Fri compliance audit
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Limit the sweep to a single repo (name). Leave blank to sweep the whole fleet.'
+        required: false
+        type: string
+      target_workflow:
+        description: 'Limit to a single workflow stub (e.g. dev-lead.yml). Leave blank for all deployable.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run — plan drift only, open no PRs'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: standards-deploy
+  cancel-in-progress: false   # Let an in-flight sweep finish to avoid partial PR state
+
+jobs:
+  deploy:
+    name: Sweep fleet and open standards-sync PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read   # only to check out this repo; all cross-repo writes use the PAT below
+    env:
+      # Cross-repo write identity for the sweep. NOT ORG_SCORECARD_TOKEN — that is
+      # the audit identity (a fine-grained PAT with Contents: Read-only), so it
+      # cannot PUT stub content into consumer repos and every deploy 422'd
+      # (petry-projects/.github#864). GH_PAT_DON_PETRY (falling back to the legacy
+      # GH_PAT_WORKFLOWS) is the SAME identity dev-lead.yml / pr-auto-review.yml /
+      # initiative-driver.yml already use to author cross-repo PRs. Its login is
+      # `don-petry` (or the GH_PAT_WORKFLOWS owner) — deliberately NOT donpetry-bot
+      # — so the standards-sync PRs it opens can be approved by donpetry-bot via the
+      # pr-review agent and land through native auto-merge with no `--admin`.
+      # Least-privilege: needs only contents:write + pull_requests:write on the
+      # target repos (a GitHub App with those two scopes, non-author-blocked and not
+      # donpetry-bot, is an acceptable substitute).
+      GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+      TARGET_REPO: ${{ inputs.target_repo }}
+      TARGET_WORKFLOW: ${{ inputs.target_workflow }}
+      DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
+    steps:
+      - name: Checkout .github repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run standards-deploy fleet sweep
+        run: bash scripts/standards-deploy-driver.sh

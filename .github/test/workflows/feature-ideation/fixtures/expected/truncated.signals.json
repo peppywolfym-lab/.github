@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0.0",
+  "scan_date": "2026-04-07T07:00:00Z",
+  "repo": "petry-projects/talkterm",
+  "open_issues": { "count": 0, "items": [] },
+  "closed_issues_30d": { "count": 0, "items": [] },
+  "ideas_discussions": { "count": 0, "items": [] },
+  "releases": [],
+  "merged_prs_30d": { "count": 0, "items": [] },
+  "feature_requests": { "count": 0, "items": [] },
+  "bug_reports": { "count": 0, "items": [] },
+  "truncation_warnings": [
+    {
+      "source": "open_issues",
+      "limit": 50,
+      "message": "result count equals limit; possible truncation"
+    },
+    {
+      "source": "ideas_discussions",
+      "limit": 100,
+      "message": "hasNextPage=true; results truncated"
+    }
+  ]
+}

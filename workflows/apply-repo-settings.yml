@@ -1,0 +1,38 @@
+# Apply repo settings — host dogfood caller (ring0).
+# .github hosts the reusable, so it self-heals through a LOCAL ./ ref (always the
+# current version under test), mirroring dependabot-automerge.yml's dogfood
+# convention (#541). Fleet repos adopt standards/workflows/apply-repo-settings.yml,
+# which pins the released channel tag instead.
+name: Apply repo settings
+
+on:
+  schedule:
+    # Weekly self-heal. Offset from other crons to spread org API load.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview changes without applying"
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-repo-settings.yml'
+
+permissions: {}
+
+concurrency:
+  group: apply-repo-settings-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/apply-repo-settings-reusable.yml  # local ref — always current (ring0 dogfood, #541)
+    with:
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      checkout_ref: ${{ github.sha }}  # dogfood the exact version under test
+    secrets: inherit  # NOSONAR(githubactions:S7635) first-party trusted reusable

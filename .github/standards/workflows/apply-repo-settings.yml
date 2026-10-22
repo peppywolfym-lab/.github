@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/apply-repo-settings.yml
+# Standard:        petry-projects/.github/standards/github-settings.md
+#                  petry-projects/.github/standards/ruleset-remediation-runbook.md
+# Reusable:        petry-projects/.github/.github/workflows/apply-repo-settings-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All settings/ruleset logic lives in the
+#     reusable workflow above; consumer repos carry NO script copy.
+#   • You MAY change: the cron offset only (stagger org API load).
+#   • You MUST NOT change: the `uses:` line, `secrets: inherit`, the job-level
+#     `permissions:` block, or the `checkout_ref` forward — reusable workflows can
+#     be granted no more permissions than the calling job has, and forwarding an
+#     input the pinned channel does not declare breaks every run at startup (#1034).
+#   • If you need different behaviour, open a PR against the reusable in the
+#     central repo.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Apply repo settings — thin caller for the org-level compliance self-heal.
+# To adopt: copy this file verbatim to .github/workflows/apply-repo-settings.yml.
+# Required org secret (inherited):
+#   GH_PAT_DON_PETRY — classic PAT, repo scope, owner has admin on this repo.
+name: Apply repo settings
+
+on:
+  schedule:
+    # Weekly self-heal. The cron offset MAY be changed to stagger org API load.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview changes without applying"
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-repo-settings.yml'
+
+permissions: {}
+
+concurrency:
+  group: apply-repo-settings-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    permissions:
+      contents: read
+    uses: petry-projects/.github/.github/workflows/apply-repo-settings-reusable.yml@apply-repo-settings/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    with:
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+      checkout_ref: apply-repo-settings/v1-stable  # keep in lockstep with the uses: channel pin
+    secrets: inherit  # NOSONAR(githubactions:S7635) first-party trusted reusable

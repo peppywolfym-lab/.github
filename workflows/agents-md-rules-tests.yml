@@ -1,0 +1,96 @@
+# Quality gate for the AGENTS.md structural rule set (the documented,
+# machine-readable single source of truth), its validating bats contract test,
+# and the Phase-2 standalone structural linter that reads it.
+#
+# Triggered on any PR (and main push) that touches:
+#   - scripts/lib/agents-md-rules.json
+#   - scripts/agents-md-lint.sh
+#   - scripts/agents-md-cycle-log.sh
+#   - docs/initiatives/agents-md-validation-cycle-log.md
+#   - tests/test_agents_md_rules_config.bats
+#   - tests/agents_md_lint.bats
+#   - tests/agents_md_cycle_log.bats
+#   - tests/fixtures/agents-md/**
+#   - .github/workflows/agents-md-rules-tests.yml
+#
+# Gate: bats validates that scripts/lib/agents-md-rules.json parses as JSON, all
+# required keys exist, the scope is structural with semantic/content checks
+# explicitly out of scope, every rule is tagged exactly 'required' or
+# 'recommended', the structurally-stable rules (single H1, valid heading
+# hierarchy, resolvable cross-references) are 'required' while contested
+# section-presence rules stay 'recommended', the captured spec snapshot records
+# a source + date, and the informational->blocking promotion gate encodes two
+# clean cycles plus maintainer sign-off. It also runs tests/agents_md_lint.bats,
+# which exercises the Phase-2 linter's pure helpers over synthetic fixtures (a
+# valid AGENTS.md plus one per failure mode) with no network, and
+# tests/agents_md_cycle_log.bats, which exercises the Phase-4 (#647) append-only
+# cycle-log reader/validator (scripts/agents-md-cycle-log.sh): every recorded
+# determination names a maintainer, and the clean-cycle precondition is reported
+# without ever promoting.
+#
+# Context: reference doc docs/initiatives/agents-md-validation.md (#643 Phase 1,
+# #644 Phase 2 of epic #642). Phase 1 delivered the data file; Phase 2 adds the
+# standalone linter (scripts/agents-md-lint.sh) that reads it. The linter's own
+# shellcheck coverage comes from ci.yml's ShellCheck job (scripts/**/*.sh).
+# Modeled on .github/workflows/agent-rate-limits-tests.yml.
+
+name: AGENTS.md Rules Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/lib/agents-md-rules.json'
+      - 'scripts/agents-md-lint.sh'
+      - 'scripts/agents-md-cycle-log.sh'
+      - 'docs/initiatives/agents-md-validation-cycle-log.md'
+      - 'tests/test_agents_md_rules_config.bats'
+      - 'tests/agents_md_lint.bats'
+      - 'tests/agents_md_cycle_log.bats'
+      - 'tests/fixtures/agents-md/**'
+      - '.github/workflows/agents-md-rules-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/lib/agents-md-rules.json'
+      - 'scripts/agents-md-lint.sh'
+      - 'scripts/agents-md-cycle-log.sh'
+      - 'docs/initiatives/agents-md-validation-cycle-log.md'
+      - 'tests/test_agents_md_rules_config.bats'
+      - 'tests/agents_md_lint.bats'
+      - 'tests/agents_md_cycle_log.bats'
+      - 'tests/fixtures/agents-md/**'
+      - '.github/workflows/agents-md-rules-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agents-md-rules-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Validate structural rule set
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          # Read-only test job — never pushes; don't leave the token in git config.
+          persist-credentials: false
+
+      - name: Install bats and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats jq
+
+      - name: Run bats suite
+        run: |
+          bats --print-output-on-failure \
+            tests/test_agents_md_rules_config.bats \
+            tests/agents_md_lint.bats \
+            tests/agents_md_cycle_log.bats

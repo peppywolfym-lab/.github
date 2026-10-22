@@ -1,0 +1,54 @@
+# Quality gates for the compliance-retrigger script and its unit tests.
+#
+# Triggered on any PR that touches:
+#   - scripts/compliance-retrigger.sh
+#   - test/scripts/compliance-retrigger/**
+#
+# Gates (all must pass before merge):
+#   1. bats — unit tests for retry/backoff, transient-error recovery, and
+#             zero-exit error-response detection
+
+name: Compliance Re-trigger Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/compliance-retrigger.sh'
+      - 'scripts/lib/**'
+      - 'test/scripts/compliance-retrigger/**'
+      - '.github/workflows/compliance-retrigger-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/compliance-retrigger.sh'
+      - 'scripts/lib/**'
+      - 'test/scripts/compliance-retrigger/**'
+      - '.github/workflows/compliance-retrigger-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compliance-retrigger-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Install bats and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats jq
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure test/scripts/compliance-retrigger/

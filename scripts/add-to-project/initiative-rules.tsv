@@ -1,0 +1,40 @@
+# Initiative <TAB> ERE regex  — deterministic classification rules for
+# classify-initiative.sh, matched (case-insensitive) against a per-item
+# signature = "title | label,label | owner/repo", all lowercased.
+#
+# ORDER IS PRIORITY (first match wins). Two tiers:
+#   1. CROSS-CUTTING infra/agentic initiatives come FIRST — they win
+#      regardless of which repo the work lives in. This is deliberate: a
+#      SonarCloud/Scorecard sweep or an auto-rebase fix inside a product repo
+#      is Org Standards / Auto-rebase work, not product work (see
+#      standards/initiatives-project.md → Org Standards covers scorecard/
+#      sonarcloud across all repos).
+#   2. PRODUCT initiatives come LAST — a repo-scoped fallback. Anything in a
+#      product repo that no infra rule claimed, plus product-feature idea
+#      drafts (which have no repo), get the product bucket via repo name or
+#      product-feature keywords.
+# Unmatched items are left BLANK and reported for triage — never guessed.
+Auto-rebase	auto.?rebase|update.?branch|rebase (bot|loop|collision)|conflict.?comment|dismiss.?stale|last.?push.?approval|stale.?base
+pr-review agent	pr.?review|(code|bot|single|advisory) review|review.?(one.?pr|decision|enumeration|loop|comments?|bot|gate|findings|annotation|enhancement|dismissal|tier|cycles?|retry)|single.?review|max_review|rubber duck|cascade|advisory.?bot|coderabbit|(gemini|copilot|sonarcloud|codex) review|fix.?request|extract_verdict|verdict|mention.?(ack|trigger)|changes_requested|@petry-review|@donpetry-bot|review-one-pr|list-prs|copilot suggest|github models|churn breaker|self.?trigger|downstream.?impact|pr_diff|mcp.*(review|tiers?|knob|config|server)|lsp (index|pilot|tool)|reviewer|awaiting review|#860|rate-limit detector|triage tier|triage inline|review.?engine|copilot engine|engine (toggle|support)|fallback to copilot|small-pr|prioriti.e .*pr|automated feedback|lsp[_ ]pilot|poll-loop|addpullrequestreview|pr approvals|deep.?review|rubber.?duck|duck.?tier|pre.?fed.?context|shared.?pr.?context|sha.?bound|few.?shot|llm.?judge|critic.?findings?|accepted.?critic|semantic.?symbol|symbol.?context|tier.?prompt|iterative.?validation|force_review|advisory.?gate|approval.?identity|bot.?review.?friction|self.?host.?deadlock
+Business Analyst	feature.?ideation|idea.?enhanc|idea.?triage|idea-enhancer|business analyst|enhance .*ideas?|single-idea enhancement|idea..?initiative pipeline|market research|epic checklist|open-questions|ready-for-dev|consumer manifest|plan\.json|grounding check|untracked .*prerequisite|strict-improvement|target_surface
+Model Selection	model.?(selection|fallback|tier|switch)|fallback model|opus.?fallback|retire .*(opus|gpt|claude-|model)|update to opus|opus 4|cross.?provider|provider.?switch|additional providers|providers,? .*model|engine.?(availability|model|upgrade)|multi-model chain|rate.?limit resilience|model.?pricing|gemini-[0-9]|gemini.?fallback|claude-sonnet-5|sonnet-5|model.?currency|model.?deprecation|deprecat.*(model|gemini)|in-engine.?fallback|validate-engines|pricing.?row
+Security	agent.?shield|prompt.?injection|input sanitiz|sanitiz|agent.?(security|hardening|governance)|jailbreak|secret.?redact|mcp.*(governance|allowlist|registry)|credential isolation|owasp|posture scoring|egress (firewall|policy|filter|rule)|firewall policy|trust escalation|agent autonomy|deepsec|org.?scan|security.?scan|vuln.?scan
+Self-healing	self.?heal|auto.?remediat|auto.?fix|self.?repair|stall detect|pipeline stall|recovery escalation|kill switch|circuit breaker|runaway (protection|agent|pr)|agent.?rate.?limit|circuit.?breaker|rate.?limit.?(taxonomy|adr|config|gate|library|standard)
+dev-lead agent	dev.?lead|deep.?impl|engine.?(timeout|error)|story churn|phantom.?spec|thin.?caller|inlined (claude|workflow)|claude\.yml|claude-fix|claude-?issue|claude code workflow|claude workflow|issue automation|prompting framework|devops agent persona|duplicate .*(pr|agent)|dedup|umbrella issue|in-progress label|claude-ci-fix|@claude|claude code|terminal coding agent|pi as org|pi harness|check_run|auto-merge|copilot.?cli
+GH-AW	gh-?aw|agentic.?workflow|(^|[^[:alnum:]])aw([^[:alnum:]]|$)|ci.?failure|failure.?analyst|ci-?analyst|failure-to-agent|lock\.?file|lock\.yml|eval scorer|held-out|rubric|proposer|skill.?eval|skillopt|skill.?candidate|plan_json|artifact (type|contract)|self-improving|eval-case|evals/|agents\.md (spec|align)|frameworks directory|frameworks/
+Copilot Instructions	copilot.*instruction|copilot coding agent|copilot governance|copilot custom|\.github/copilot|copilot-instructions
+Cost Observability	cost (attribution|observ|meter|arbitrage|report|api)|token.?(cost|savings|report|metric|observ)|budget (enforcement|circuit breaker|guardrail|tracking|aware)|credit budget|observability dashboard|opentelemetry|otel|effective token|\bet\b .*anomaly|usage & cost|billing-aware|batch api cost
+Fleet Monitor	fleet.?(monitor|tracker|view|health)|health.?check|hourly runs?|cron entr|scheduled .*(runs?|actions)
+Daily Reports	daily.?report|nightly.?report|status.?digest|org.?status
+Compliance Blitz	compliance.?blitz|compliance.?day|compliance backlog
+Org Standards	sonarcloud|sonar[ ._-]|s7[0-9]{3}|s86[0-9]{2}|s59[0-9]{2}|s3776|s5906|scorecard|ruleset|codeowners|branch.?(protection|ruleset)|push.?protection|ci.?standard|baseline|standards.?(sync|deploy|reconcile)|nosonar|secret.?scan|gitleaks|dependency.?(harden|pinning)|pin.*(sha|ref|reusable|version|action)|actionlint|yamllint|lint check|dependabot|org.?standard|org-wide .*(standard|instruction|reusable)|code.?quality|zizmor|oidc|access control|standards drift|drift.?(guard|detection)|integrity verification|execution protection|security linting|pull.?request.?limits|pr.?limits|admission gate|agents\.md|claude\.md|codeql|reusable workflow|apply-repo-settings|repo settings|profile readme|coding standard|ci pipeline|markdown lint|concurrency group|check-suite|slsa|attestation|bootstrap.?new.?repo|repo.?template|non-file policy|require .*discussions|has_discussions|structured logging|cqrs|stacked pr|worktree|convention|merge queue|noise reduction|cognitive complexity|jest assertion|ci\.yml|gh_pat|pat auth|machine user|repository settings|ci/cd standard|new-repo|pr.?limit|fail loud|never fake|orchestration guidance|reusable.?workflow|byte.?identit|org.?settings|off.?peak|top.?of.?the.?hour|spec.?drift|drift.?closed|caller.?stub|redispatch|repin|all.?reusables
+Compliance program	compliance|audit|remediat
+Release Strategy	release.?(strategy|train|notes|channel|cadence|automation|cut|soak|ring)|cut.?release|autocut|soak.?(promote|and-promote)|ring.?(rollout|promote|enrol|stag)|channel.?(promote|cut|soak|pin)|canary|version(ing)? (scheme|standard)|semantic versioning|tag protection|rollback|promote .*(channel|ring|stable)|stable.?tag|off.?@main|per-ring|channel.?tag|ring.?channel|blue.?green|concentric.?ring|ring.?model|ring.?0|game.?day
+Initiatives Project	initiative|add.?to.?project|projects? v2|project board|roadmap view|initiatives project|issue.?fields|github projects|updateprojectv2field|option.?wipe
+Tooling	tooling|scratchpad|dev.?tool|utility script|template gallery|\bkiro\b
+Broodly	/broodly|broodminder|\bhive\b|honey|nectar|bloom|colony|\bmite|apiary|beekeep|hornet|treatment efficacy|nfc and qr|acoustic colony|zero-tap|off-season engagement
+Markets	/markets|snap/ebt|produce recognition|app-averse|failed-trip|vendor catalog|north-star|discover filter|sms check-in
+Google App Scripts	/google-app-scripts|apps? script|script_catalog|gmail|deployed-script
+TalkTerm	/talkterm|avatar|elevenlabs|lip-sync|screen companion|companion mode|3d avatar|spatial audio|byok|effort modes|voice (assistant|agent|interface|provider|transcription)|conversational (voice|oauth|permission|mcp|onboarding)|screenshot context|deliberation mode|emotion-aware|multi-language voice|infinite conversation|on-device (voice|ai)|vision-native|natural language automation|shareable session|workspace intelligence|contextual workspace|conversational recurring|visual workflow replay
+ContentTwin	/contenttwin|content.?twin
+BMAD	/bmad-bgreat|bmad-bgreat|bmad suite|bmad method|bmad-method|\bbmad\b|bmad

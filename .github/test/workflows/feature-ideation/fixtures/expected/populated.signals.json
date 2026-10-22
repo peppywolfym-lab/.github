@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0.0",
+  "scan_date": "2026-04-07T07:00:00Z",
+  "repo": "petry-projects/talkterm",
+  "open_issues": {
+    "count": 2,
+    "items": [
+      {
+        "number": 101,
+        "title": "Add dark mode",
+        "labels": [{ "name": "enhancement" }],
+        "createdAt": "2026-03-15T10:00:00Z",
+        "author": { "login": "alice" }
+      },
+      {
+        "number": 102,
+        "title": "Crash on startup",
+        "labels": [{ "name": "bug" }],
+        "createdAt": "2026-03-20T11:00:00Z",
+        "author": { "login": "bob" }
+      }
+    ]
+  },
+  "closed_issues_30d": {
+    "count": 1,
+    "items": [
+      {
+        "number": 95,
+        "title": "Old issue",
+        "labels": [],
+        "closedAt": "2026-03-25T12:00:00Z"
+      }
+    ]
+  },
+  "ideas_discussions": {
+    "count": 1,
+    "items": [
+      {
+        "id": "D_1",
+        "number": 7,
+        "title": "💡 Streaming voice responses",
+        "createdAt": "2026-03-01T00:00:00Z",
+        "updatedAt": "2026-04-01T00:00:00Z",
+        "labels": { "nodes": [{ "name": "enhancement" }] },
+        "comments": { "totalCount": 3 }
+      }
+    ]
+  },
+  "releases": [
+    {
+      "tagName": "v0.1.0",
+      "name": "Initial preview",
+      "publishedAt": "2026-03-30T00:00:00Z",
+      "isPrerelease": true
+    }
+  ],
+  "merged_prs_30d": {
+    "count": 1,
+    "items": [
+      {
+        "number": 60,
+        "title": "feat: weekly ideation workflow",
+        "labels": [],
+        "mergedAt": "2026-04-01T00:00:00Z"
+      }
+    ]
+  },
+  "feature_requests": {
+    "count": 1,
+    "items": [
+      {
+        "number": 101,
+        "title": "Add dark mode",
+        "labels": [{ "name": "enhancement" }],
+        "createdAt": "2026-03-15T10:00:00Z",
+        "author": { "login": "alice" }
+      }
+    ]
+  },
+  "bug_reports": {
+    "count": 1,
+    "items": [
+      {
+        "number": 102,
+        "title": "Crash on startup",
+        "labels": [{ "name": "bug" }],
+        "createdAt": "2026-03-20T11:00:00Z",
+        "author": { "login": "bob" }
+      }
+    ]
+  },
+  "truncation_warnings": []
+}

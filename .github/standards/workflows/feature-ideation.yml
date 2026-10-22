@@ -1,0 +1,215 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/feature-ideation.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md#8-feature-ideation-feature-ideationyml--bmad-method-repos
+# Reusable:        petry-projects/.github/.github/workflows/feature-ideation-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. The 5-phase ideation pipeline, the
+#     Opus 4.6 model selection, the github_token override, and the
+#     ANTHROPIC_MODEL env var all live in the reusable workflow above.
+#   • You MAY change: the `project_context` value (the only required edit
+#     per repo), and optionally the cron schedule.
+#   • You MUST NOT change: trigger event shape, the `uses:` line, the
+#     job-level `permissions:` block, or the `secrets:` block — these are
+#     required for the reusable to work.
+#   • If you need different behaviour, open a PR against the reusable in
+#     the central repo. The change will propagate everywhere on next run.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Feature Ideation workflow stub — for BMAD Method-enabled repos.
+#
+# This is a thin caller for the org-wide reusable workflow at
+# petry-projects/.github/.github/workflows/feature-ideation-reusable.yml
+# All ideation logic, the multi-skill pipeline, the Opus 4.6 model
+# selection, and the github_token override live in the reusable workflow.
+#
+# To adopt:
+#   1. Copy this file to .github/workflows/feature-ideation.yml in your repo.
+#   2. Replace the `project_context` value with a 3-5 sentence description
+#      of your project, its target users, and the competitive landscape Mary
+#      should research. This is the only required customisation.
+#   3. (Optional) Copy standards/feature-ideation-sources.md from
+#      petry-projects/.github to .github/feature-ideation-sources.md in your
+#      repo and trim/extend it for your project. Mary uses YOUR copy — not the
+#      central template — so each repo controls its own source list.
+#      Pass `sources_file: path/to/your-list.md` to the reusable workflow if
+#      you prefer a different location.
+#   4. (Optional) Adjust the schedule cron if Friday morning UTC doesn't suit.
+#   5. Ensure GitHub Discussions is enabled with an "Ideas" category.
+#   6. Confirm the org-level secret CLAUDE_CODE_OAUTH_TOKEN is accessible.
+#
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#8-feature-ideation-feature-ideationyml--bmad-method-repos
+name: Feature Research & Ideation (BMAD Analyst)
+
+on:
+  schedule:
+    - cron: '0 7 * * 5' # Friday 07:00 UTC (3 AM EDT / 2 AM EST)
+  workflow_dispatch:
+    inputs:
+      focus_area:
+        description: 'Optional focus area (e.g., "accessibility", "performance")'
+        required: false
+        type: string
+      research_depth:
+        description: 'Research depth'
+        required: false
+        default: 'standard'
+        type: choice
+        options:
+          - quick
+          - standard
+          - deep
+      dry_run:
+        description: 'Skip Discussion mutations and log them to a JSONL artifact instead. Use this on a fork to smoke-test before going live.'
+        required: false
+        default: false
+        type: boolean
+      enhance_backlog:
+        description: 'Backlog enhancement sweep: enhance this repo''s open, human-authored, not-yet-enhanced Ideas (one comment each, idempotent). Combine with dry_run=true to preview.'
+        required: false
+        default: false
+        type: boolean
+      target_discussion:
+        description: 'Internal — set by `redispatch` when bridging a `discussion:created` event to workflow_dispatch (claude-code-action does not support discussion contexts). Not for manual use.'
+        required: false
+        default: ''
+        type: string
+  # Auto-enhance a freshly-created idea: when a new Discussion is opened in the
+  # Ideas category, the `redispatch` job bridges it to workflow_dispatch (see below)
+  # so the analyst refines it in single-idea mode under a supported event.
+  discussion:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: feature-ideation
+  cancel-in-progress: false
+
+jobs:
+  # ── #963 discussion→dispatch redispatch bridge ───────────────────────────────
+  # claude-code-action aborts on `discussion` event contexts ("Unsupported event
+  # type: discussion"). So on `discussion: created` we do NOT call the reusable
+  # inline; the `redispatch` job re-invokes this workflow via workflow_dispatch
+  # (under which the action runs cleanly), passing the number as target_discussion.
+  # Mirrors initiative-planner.yml's redispatch (#618). The `ideate` reusable call
+  # then runs only on workflow_dispatch/schedule.
+  redispatch:
+    if: >-
+      github.event_name == 'discussion' &&
+      github.event.discussion.category.slug == 'ideas' &&
+      github.event.discussion.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Guard — PAT present
+        # A workflow_dispatch fired with GITHUB_TOKEN is accepted but never starts
+        # a run (loop prevention), so a PAT is required (same as initiative-planner).
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::GH_PAT_WORKFLOWS is required — a workflow_dispatch fired with GITHUB_TOKEN will not start a run."
+            exit 1
+          fi
+      - name: Re-dispatch under workflow_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          REPO: ${{ github.repository }}
+          DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
+        run: |
+          gh workflow run feature-ideation.yml --repo "${REPO}" \
+            -f target_discussion="${DISCUSSION_NUMBER}"
+
+  # ── #571 input resolution — keep `inputs` out of the reusable `with:` ────────
+  # A reusable-workflow call graph (its `uses:` + `with:`) is validated at
+  # WORKFLOW SETUP, before — and regardless of — the calling job's `if:`. The
+  # `inputs` context is only populated for workflow_dispatch/workflow_call, so a
+  # `with:` that references `${{ inputs.* }}` trips a zero-job startup failure on
+  # the `discussion` event even though `ideate` is gated off it. We therefore
+  # resolve the dispatch inputs in this ordinary job (whose step expressions are
+  # evaluated at RUN time and are skipped on `discussion`) and hand them to
+  # `ideate` via `needs.prep.outputs.*` — an always-valid context that defers the
+  # `with:` evaluation to run time. Do not reference `inputs` in `ideate.with`.
+  prep:
+    if: github.event_name != 'discussion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      target_discussion: ${{ steps.resolve.outputs.target_discussion }}
+      focus_area: ${{ steps.resolve.outputs.focus_area }}
+      research_depth: ${{ steps.resolve.outputs.research_depth }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+      enhance_backlog: ${{ steps.resolve.outputs.enhance_backlog }}
+    steps:
+      - name: Resolve dispatch inputs
+        id: resolve
+        # `github.event.inputs.*` (not the `inputs` context) so this reads
+        # cleanly on schedule too, where it is simply null → the defaults below.
+        env:
+          TARGET_DISCUSSION: ${{ github.event.inputs.target_discussion }}
+          FOCUS_AREA: ${{ github.event.inputs.focus_area }}
+          RESEARCH_DEPTH: ${{ github.event.inputs.research_depth }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          ENHANCE_BACKLOG: ${{ github.event.inputs.enhance_backlog }}
+        run: |
+          {
+            echo "target_discussion=${TARGET_DISCUSSION:-}"
+            echo "focus_area=${FOCUS_AREA:-}"
+            echo "research_depth=${RESEARCH_DEPTH:-standard}"
+            echo "dry_run=${DRY_RUN:-false}"
+            echo "enhance_backlog=${ENHANCE_BACKLOG:-false}"
+          } >> "$GITHUB_OUTPUT"
+
+  ideate:
+    # Runs on workflow_dispatch (including the redispatch bridge above) and schedule.
+    needs: [prep]
+    if: github.event_name != 'discussion'
+    # Permissions cascade from the calling job to the reusable workflow.
+    # The reusable workflow's two jobs (gather-signals + analyze) need:
+    #   - contents:      read   (checkout, file reads)
+    #   - issues:        read   (signal collection)
+    #   - pull-requests: read   (signal collection)
+    #   - discussions:   write  (CRITICAL — create/update Discussion threads)
+    #   - id-token:      write  (claude-code-action OIDC for GitHub App token)
+    #   - actions:       read   (feed checkpoint — last successful run query)
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      discussions: write
+      id-token: write
+      actions: read
+    uses: petry-projects/.github/.github/workflows/feature-ideation-reusable.yml@feature-ideation/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    with:
+      # All values below come from `needs.prep.outputs.*` (resolved in the `prep`
+      # job) — NOT the `inputs` context — so this reusable `with:` compiles on the
+      # `discussion` event without a zero-job startup failure (#571).
+      # `target_discussion` is forwarded by the `redispatch` bridge above on
+      # `discussion: created`; empty on schedule/dispatch → normal scan.
+      target_discussion: ${{ needs.prep.outputs.target_discussion }}
+      # === CUSTOMISE THIS PER REPO — the only required edit ===
+      # Replace this paragraph with a 3-5 sentence description of your project,
+      # its target users, and the competitive landscape. The more specific you
+      # are, the more useful the proposals.
+      project_context: |
+        TODO: Replace this with a description of the project and its market.
+        Example: "ProjectX is a [type of product] for [target user]. Competitors
+        include A, B, C. Key emerging trends in this space: X, Y, Z."
+      # === OPTIONAL: repo-local reputable source list ===
+      # Copy standards/feature-ideation-sources.md from petry-projects/.github
+      # to .github/feature-ideation-sources.md and customise it. The reusable
+      # workflow defaults to that path, so you only need to uncomment and change
+      # sources_file below if you store the list somewhere else.
+      # sources_file: 'docs/feature-ideation-sources.md'
+      focus_area: ${{ needs.prep.outputs.focus_area }}
+      research_depth: ${{ needs.prep.outputs.research_depth }}
+      # prep emits the string 'true'/'false'; fromJSON casts it to the boolean
+      # the reusable's typed inputs require.
+      dry_run: ${{ fromJSON(needs.prep.outputs.dry_run) }}
+      # Backlog enhancement sweep of existing un-enhanced Ideas (workflow_dispatch).
+      enhance_backlog: ${{ fromJSON(needs.prep.outputs.enhance_backlog) }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

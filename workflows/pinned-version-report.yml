@@ -1,0 +1,35 @@
+name: Pinned-version report
+
+# Safe Release SC8 (#495/#502): publish "who is on what version" across the fleet.
+# Reports each ring consumer's pinned channel + the immutable release it resolves
+# to, for every ring-released reusable, and flags ring-tier drift. Read-only.
+
+on:
+  schedule:
+    - cron: '31 8 * * 1'   # Mondays 08:31 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Guard — PAT present
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::GH_PAT_DON_PETRY (or legacy GH_PAT_WORKFLOWS) is required — cross-repo reads need the org PAT, not github.token."
+            exit 1
+          fi
+      - name: Generate pinned-version report
+        env:
+          # Needs cross-repo read on consumers + tag read on the host repos.
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          ORG: petry-projects
+        run: bash scripts/pinned-version-report.sh

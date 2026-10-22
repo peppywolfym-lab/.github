@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dev-Lead Agent — thin caller stub
+# Standard:  petry-projects/.github/standards/ci-standards.md#5-dev-lead-agent
+# Reusable:  petry-projects/.github-private/.github/workflows/dev-lead-reusable.yml
+#
+# ADOPTING THIS WORKFLOW:
+#   1. Copy this file verbatim to .github/workflows/dev-lead.yml in your repo.
+#   2. Ensure CLAUDE_CODE_OAUTH_TOKEN is set as an org or repo secret.
+#   3. Optionally set GH_PAT_WORKFLOWS (required if Claude pushes workflow files).
+#   4. Optionally set vars.DEV_LEAD_ENGINE = "claude" | "gemini" | "copilot".
+#
+# UNLIKE claude.yml, this file has NO OIDC byte-for-byte constraint and may be
+# freely modified on PR branches to adjust triggers for repo-specific needs.
+#
+# REQUIRED secrets: CLAUDE_CODE_OAUTH_TOKEN
+# OPTIONAL secrets: GH_PAT_WORKFLOWS, GOOGLE_API_KEY, GH_PAT
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Dev-Lead Agent
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  issues:
+    types: [labeled]
+  check_run:
+    types: [completed]
+  repository_dispatch:
+    types: [dev-lead-ci-failure, dev-lead-reviews-retry, dev-lead-issue-retry]
+
+permissions: {}
+
+# Concurrency is centralised in the reusable workflow (dev-lead-reusable.yml) with
+# per-issue / per-PR lanes, so issue pickups are never cancelled by PR follow-up
+# traffic and the grouping can't drift per-repo. See petry-projects/.github#402.
+
+jobs:
+  dev-lead:
+    uses: petry-projects/.github-private/.github/workflows/dev-lead-reusable.yml@dev-lead/v139-ring0  # NOSONAR(githubactions:S7637) first-party channel ref
+    with:
+      agent_ref: dev-lead/v139-ring0
+    secrets: inherit  # NOSONAR(githubactions:S7635) first-party trusted reusable
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      checks: read
+      statuses: read   # required by dev-lead-reusable.yml since #435

@@ -1,0 +1,43 @@
+name: Compliance Issue Re-trigger
+
+on:
+  schedule:
+    - cron: '11 * * * *'   # Hourly at :11 — off the top of the hour (≤ one engagement per repo per run)
+  workflow_dispatch:
+    inputs:
+      stale_days:
+        description: 'Re-trigger issues older than N days (default: 2)'
+        required: false
+        default: '2'
+        type: string
+      dry_run:
+        description: 'Dry run — log without making changes'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: compliance-retrigger
+  cancel-in-progress: false
+
+jobs:
+  retrigger:
+    name: Re-trigger stale compliance issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.ORG_SCORECARD_TOKEN }}
+      ORG: ${{ github.repository_owner }}
+      STALE_DAYS: ${{ inputs.stale_days || '2' }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+    steps:
+      - name: Checkout .github repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Re-trigger stale compliance issues
+        run: bash scripts/compliance-retrigger.sh

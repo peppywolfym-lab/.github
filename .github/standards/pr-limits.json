@@ -1,0 +1,21 @@
+{
+  "status": "signed-off",
+  "_note": "Human sign-off 2026-07-01 (epic #505 gate #566): the policy is a SINGLE org-wide soft ceiling of 50 concurrent open, non-draft automation PRs — no per-source sub-caps. 50 sits just above the ADR §5 baseline (~47 open, ~34 non-Dependabot automation), so it caps runaway growth without refusing any PR today. Counts only non-Dependabot automation (ADR §7.4). No native GitHub PR-count surface exists (ADR §2-§3); enforced source-side by scripts/lib/pr-limit-gate.sh. Consumers read values from this single file, never hardcoded.",
+  "_schema_version": 1,
+  "org_wide": {
+    "automation_open_pr_cap": 50,
+    "_note": "Signed-off soft cap (2026-07-01) on concurrent open, non-draft automation PRs org-wide, counting only non-Dependabot sources (ADR §6, §7.4). Set above the ~47 baseline to bound runaway growth without blocking current traffic."
+  },
+  "_per_source_caps_note": "Per-source sub-caps are intentionally UNUSED under the signed-off policy (2026-07-01): a single org-wide ceiling of 50, not per-source throttles (a dev-lead sub-cap below its current ~30 open PRs would have blocked it immediately). Left as an empty map; ADR §6 made per-source caps optional/complementary, and a consumer applies a sub-cap only when one is present here.",
+  "per_source_caps": {},
+  "exempt_actors": [
+    "dependabot[bot]",
+    "OrganizationAdmin",
+    "@petry-projects/org-leads",
+    "dependabot-automerge-petry"
+  ],
+  "exempt_labels": [
+    "security"
+  ],
+  "_exempt_note": "Actors/labels whose PRs must never be blocked by the cap (ADR §6, §7.4). dependabot[bot] is exempt because it is already bounded per-ecosystem and security PRs must never be starved; OrganizationAdmin / @petry-projects/org-leads are human break-glass and maintainer PRs; dependabot-automerge-petry operates on existing PRs (does not add to the queue); security-labeled PRs are urgent fixes that bypass any throttle."
+}

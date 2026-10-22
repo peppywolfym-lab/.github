@@ -1,0 +1,55 @@
+# Regression guard for the flaky "Lint GitHub Actions" download in ci.yml
+# (issue #894): every curl download in ci.yml must carry bounded retries so a
+# transient GitHub Releases blip retries instead of failing the job.
+# See test/workflows/ci/install-resilience.bats.
+name: CI Workflow Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ci.yml'
+      - 'test/workflows/ci/**'
+      - '.github/workflows/ci-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ci.yml'
+      - 'test/workflows/ci/**'
+      - '.github/workflows/ci-tests.yml'
+
+permissions: {}
+
+concurrency:
+  group: ci-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install bats
+        run: |
+          set -euo pipefail
+          for attempt in {1..3}; do
+            if sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bats; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Apt install failed, retrying in 5 seconds..." >&2
+              sleep 5
+            fi
+          done
+          echo "Apt install failed after 3 attempts" >&2
+          exit 1
+
+      - name: bats
+        run: bats --print-output-on-failure test/workflows/ci/

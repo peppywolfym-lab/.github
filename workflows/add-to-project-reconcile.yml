@@ -1,0 +1,92 @@
+# Backlog reconcile for the Initiatives project (petry-projects/.github#518).
+#
+# The event-driven add-to-project automation misses qualifying items created by
+# the default GITHUB_TOKEN (GitHub doesn't fire workflows from default-token
+# events) and items whose run was dropped under congestion. This scheduled/
+# manual reconcile scans every installed repo's OPEN issues/PRs (issues
+# un-gated; PRs keep the dev-lead gate) and reconciles them onto the board
+# using the same gate + helpers as the event path — so missed items land
+# within one cycle.
+#
+# Runs centrally in petry-projects/.github (the scripts live here); mints the
+# petry-projects-planner App token for issues/PRs read + project write.
+#
+# Two phases run in order each cycle:
+#   1. reconcile — ensure every qualifying issue/PR/Idea is ON the board.
+#   2. classify  — set the Initiative (+ Theme) field on board items that
+#      don't have one yet (petry-projects/.github#415). Classify runs AFTER
+#      reconcile so items added this cycle are categorized in the same run.
+name: Add-to-Project Reconcile
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log intended adds/removes/classifications without mutating the board"
+        type: boolean
+        default: true
+      repos:
+        description: "Optional space-separated owner/repo list (default: all App-installed repos)"
+        type: string
+        default: ""
+      reclassify_all:
+        description: "Re-evaluate the Initiative on items that already have one (default: only fill blanks)"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "54 7 * * *" # daily 07:54 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: add-to-project-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    # 30 min covers a cold catch-up cycle (many genuine adds after a gap). Steady
+    # state is far under this: the membership prefetch in reconcile-backlog.sh
+    # skips a per-item API call for everything already on the board, so only real
+    # changes touch the API. Raised from 20 (which the un-gated backlog overran,
+    # starving the classify step) — see reconcile-backlog.sh prefetch_board_membership.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.INITIATIVES_APP_ID }}
+          private-key: ${{ secrets.INITIATIVES_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Reconcile backlog into the project
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_ID: PVT_kwDOD2inqs4BZq3-
+          PROJECT_URL: https://github.com/orgs/petry-projects/projects/1
+          REQUIRED_LABEL: dev-lead
+          EXCLUDED_LABELS: compliance-audit,health-check,fleet-tracker,daily-report
+          RECON_REPOS: ${{ inputs.repos }}
+          # Manual runs default to dry-run; scheduled runs are live.
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+        run: bash .github/scripts/add-to-project/reconcile-backlog.sh
+
+      - name: Classify Initiative on board items
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_ID: PVT_kwDOD2inqs4BZq3-
+          PROJECT_URL: https://github.com/orgs/petry-projects/projects/1
+          # Same dry-run gating as reconcile: manual runs default to dry-run,
+          # scheduled runs are live.
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+          # Only fill blank Initiatives by default; opt in to re-evaluate all.
+          RECLASSIFY: ${{ (github.event_name == 'workflow_dispatch' && inputs.reclassify_all) && 'all' || '' }}
+        run: bash .github/scripts/add-to-project/classify-initiative.sh

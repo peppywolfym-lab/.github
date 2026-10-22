@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/dependabot-rebase.yml
+# Standard:        petry-projects/.github/standards/dependabot-policy.md
+# Reusable:        petry-projects/.github/.github/workflows/dependabot-rebase-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All rebase/merge serialization logic
+#     lives in the reusable workflow above.
+#   • You MAY change: nothing in normal use. NOTE: this file intentionally uses
+#     a LOCAL ref (`./`) instead of a pinned SHA — this repo IS the source of
+#     truth, so a local ref is always current. Other repos use pinned SHAs
+#     (see standards/workflows/dependabot-rebase.yml).
+#   • You MUST NOT change: the concurrency group name, the explicit secrets
+#     block, or the job-level `permissions:` block — reusable workflows can
+#     be granted no more permissions than the calling job has, so removing
+#     the stanza breaks the reusable's gh API calls. Do not remove any
+#     trigger (`push` keeps the self-sustaining chain; `schedule` is the
+#     safety net when no PR merges have occurred recently; `workflow_dispatch`
+#     allows manual queue flushes).
+#   • If you need different behaviour, open a PR against the reusable in the
+#     central repo.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Dependabot update-and-merge — thin caller for the org-level reusable.
+# To adopt: copy standards/workflows/dependabot-rebase.yml (NOT this file) to
+#   .github/workflows/dependabot-rebase.yml in your repo. This file uses a
+#   local ref (`./.github/workflows/dependabot-rebase-reusable.yml`) that is
+#   only valid in the petry-projects/.github source-of-truth repo.
+# Required org/repo secrets (inherited):
+#   APP_ID         — GitHub App ID with contents:write and pull-requests:write
+#   APP_PRIVATE_KEY — GitHub App private key
+name: Dependabot update and merge
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '50 */4 * * *' # every 4 hours at :50 — safety net when no pushes to main trigger the chain
+  workflow_dispatch: # allow manual trigger to flush Dependabot PR queue
+
+concurrency:
+  group: dependabot-update-and-merge
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  dependabot-rebase:
+    permissions:
+      contents: write   # update-branch via GITHUB_TOKEN (may touch .github/workflows/)
+      pull-requests: write  # re-approve PRs after branch update
+    uses: ./.github/workflows/dependabot-rebase-reusable.yml  # local ref — always current
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}

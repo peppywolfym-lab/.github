@@ -1,0 +1,132 @@
+# Reusable AgentShield workflow — single source of truth for the org.
+# Repo-level agent-shield.yml files call this to avoid duplicating
+# the security scan and structural checks.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/agent-standards.md
+#
+# Two-layer approach:
+#   1. ecc-agentshield CLI — deep security scan (102 rules across secrets,
+#      permissions, hooks, MCP servers, and agent config)
+#   2. Org-specific structural checks — required files, cross-references,
+#      SKILL.md frontmatter validation
+#
+# Inputs let callers tune severity, the org reference string, and the set
+# of required files without forking the workflow.
+name: AgentShield (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      min-severity:
+        description: "Minimum AgentShield severity to fail on (low/medium/high/critical)"
+        required: false
+        type: string
+        default: "high"
+      agentshield-version:
+        description: "Pinned ecc-agentshield npm version"
+        required: false
+        type: string
+        default: "1.4.0"
+      required-files:
+        description: "Newline-separated list of required agent config files"
+        required: false
+        type: string
+        default: |
+          CLAUDE.md
+          AGENTS.md
+      org-standards-ref:
+        description: "String AGENTS.md must reference (regex, basic grep -E)"
+        required: false
+        type: string
+        default: 'petry-projects/\.github'
+
+permissions:
+  contents: read
+
+jobs:
+  agent-shield:
+    name: AgentShield
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # --- Deep security scan via AgentShield CLI ---
+      # Uses ecc-agentshield (https://github.com/affaan-m/agentshield)
+      # 102 rules: secrets, permissions, hooks, MCP servers, agent config
+      - name: AgentShield Security Scan
+        env:
+          AS_VERSION: ${{ inputs.agentshield-version }}
+          AS_SEVERITY: ${{ inputs.min-severity }}
+        run: |
+          npx --ignore-scripts "ecc-agentshield@${AS_VERSION}" scan \
+            --path . \
+            --min-severity "${AS_SEVERITY}" \
+            --format terminal
+
+      # --- Org-specific structural checks ---
+      - name: Check required agent files exist
+        env:
+          REQUIRED_FILES: ${{ inputs.required-files }}
+        run: |
+          status=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing required agent file: $f"
+              status=1
+            fi
+          done <<< "$REQUIRED_FILES"
+          exit $status
+
+      - name: Validate cross-references
+        env:
+          ORG_REF: ${{ inputs.org-standards-ref }}
+        run: |
+          status=0
+
+          if [ -f "CLAUDE.md" ] && \
+             ! grep -qi 'AGENTS.md' CLAUDE.md; then
+            echo "::error file=CLAUDE.md::Must reference AGENTS.md"
+            status=1
+          fi
+
+          if [ -f "AGENTS.md" ] && \
+             ! grep -qiE "$ORG_REF" AGENTS.md; then
+            echo "::error file=AGENTS.md::Must reference org standards ($ORG_REF)"
+            status=1
+          fi
+
+          exit $status
+
+      - name: Validate SKILL.md frontmatter
+        run: |
+          status=0
+
+          while IFS= read -r file; do
+            frontmatter=$(awk \
+              '/^---$/{n++; next} n==1{print} n>=2{exit}' \
+              "$file")
+
+            if [ -z "$frontmatter" ]; then
+              echo "::error file=$file::Missing YAML frontmatter"
+              status=1
+              continue
+            fi
+
+            # Allow optional leading whitespace so indented YAML keys
+            # (e.g. under a `metadata:` parent) are recognised.
+            if ! echo "$frontmatter" | grep -qE '^[[:space:]]*name:'; then
+              echo "::error file=$file::Missing 'name' field"
+              status=1
+            fi
+            if ! echo "$frontmatter" | grep -qE '^[[:space:]]*description:'; then
+              echo "::error file=$file::Missing 'description' field"
+              status=1
+            fi
+          done < <(find . -name 'SKILL.md' \
+            -not -path '*/node_modules/*' \
+            -not -path '*/.git/*')
+
+          if [ "$status" -eq 0 ]; then
+            echo "All SKILL.md frontmatter validated."
+          fi
+          exit $status

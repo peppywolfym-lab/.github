@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dev-Lead Agent — thin caller stub
+# Standard:  petry-projects/.github/standards/ci-standards.md#5-dev-lead-agent
+# Reusable:  petry-projects/.github-private/.github/workflows/dev-lead-reusable.yml
+#
+# ADOPTING THIS WORKFLOW:
+#   1. Copy this file verbatim to .github/workflows/dev-lead.yml in your repo.
+#   2. Ensure CLAUDE_CODE_OAUTH_TOKEN is set as an org or repo secret.
+#   3. Optionally set GH_PAT_WORKFLOWS (required if Claude pushes workflow files).
+#   4. Optionally set vars.DEV_LEAD_ENGINE = "claude" | "gemini" | "copilot".
+#   5. SonarCloud-gated repo? Nothing to do — the `uses:` line below already
+#      carries the inline `# NOSONAR(githubactions:S7637)` marker. The ref is a
+#      first-party reusable pinned to a moving channel/ring tag, so without the
+#      marker SonarCloud's githubactions:S7637 would fail the Quality Gate. The
+#      marker travels with this file on copy; no sonar-project.properties entry
+#      is needed. See https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#sonarcloud-exemption-first-party-reusable-ref-s7637.
+#
+# This stub is copied VERBATIM and is full-file identical across every adopting
+# repo, modulo the per-repo ring/channel pin on the `uses:` ref and its matching
+# `agent_ref` (below). Any other diff is drift, not a repo-specific liberty:
+# `on:`, `permissions:`, and `concurrency:` are NOT repo-adjustable — do not trim
+# a trigger, narrow a permission, or add a concurrency block on a PR branch. The
+# behavior lives in the reusable, so change it there (or via a standards PR) and
+# let the channel tag promote it centrally — never by editing this caller. See
+# https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#centralization-tiers and
+# https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#reusable-workflow-versioning--the-stable-channel.
+#
+# REQUIRED secrets: CLAUDE_CODE_OAUTH_TOKEN
+# OPTIONAL secrets: GH_PAT_WORKFLOWS, GOOGLE_API_KEY, GH_PAT
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Dev-Lead Agent
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  issues:
+    types: [labeled]
+  check_run:
+    types: [completed]
+  repository_dispatch:
+    types: [dev-lead-ci-failure, dev-lead-reviews-retry, dev-lead-issue-retry]
+
+permissions: {}
+
+# Concurrency is centralised in the reusable workflow (dev-lead-reusable.yml) with
+# per-issue / per-PR lanes, so issue pickups are never cancelled by PR follow-up
+# traffic and the grouping can't drift per-repo. See petry-projects/.github#402.
+
+jobs:
+  dev-lead:
+    # Pinned to the moving dev-lead/v1-stable channel tag, not @main, so a broken
+    # change to dev-lead can no longer gate its own fix (the self-host circular
+    # dependency). Promotion is done by moving the dev-lead/v1-stable tag centrally; this
+    # caller is never edited on release. agent_ref threads the same channel into
+    # dev-lead's own scripts/prompts checkout. See https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#dev-lead-agent.
+    uses: petry-projects/.github-private/.github/workflows/dev-lead-reusable.yml@dev-lead/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    with:
+      agent_ref: dev-lead/v1-stable
+    secrets: inherit  # NOSONAR(githubactions:S7635) first-party trusted reusable
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      checks: read
+      statuses: read

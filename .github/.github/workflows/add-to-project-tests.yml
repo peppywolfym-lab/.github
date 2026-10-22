@@ -1,0 +1,69 @@
+name: Add to Project Tests
+
+# Quality gates for the add-to-project workflow and its supporting scripts.
+#
+# Triggered on any PR that touches:
+#   - .github/workflows/add-to-project.yml
+#   - .github/workflows/add-to-project-reusable.yml
+#   - .github/workflows/add-to-project-tests.yml
+#   - .github/scripts/add-to-project/**
+#   - test/workflows/add-to-project/**
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for every script in the suite
+#   2. bats       — full unit suite (see test/workflows/add-to-project)
+#
+# Standard: mirrors the gate model used by feature-ideation-tests.yml.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/add-to-project.yml'
+      - '.github/workflows/add-to-project-reusable.yml'
+      - '.github/workflows/add-to-project-tests.yml'
+      - '.github/scripts/add-to-project/**'
+      - 'test/workflows/add-to-project/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/add-to-project.yml'
+      - '.github/workflows/add-to-project-reusable.yml'
+      - '.github/workflows/add-to-project-tests.yml'
+      - '.github/scripts/add-to-project/**'
+      - 'test/workflows/add-to-project/**'
+
+permissions: {}
+
+concurrency:
+  group: add-to-project-tests-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Shellcheck and bats
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.0
+
+      - name: ShellCheck on add-to-project scripts and test harness
+        run: |
+          set -euo pipefail
+          shellcheck -S warning \
+            .github/scripts/add-to-project/*.sh \
+            test/workflows/add-to-project/stubs/gh \
+            test/workflows/add-to-project/helpers/setup.bash
+
+      - name: Install bats
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y bats
+
+      - name: Run bats suite
+        run: |
+          set -euo pipefail
+          bats --print-output-on-failure test/workflows/add-to-project/

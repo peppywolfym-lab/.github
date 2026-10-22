@@ -1,0 +1,70 @@
+# PR Auto-Review — Catch-up Sweep (issue #868, surfaced by Epic #850 / #857).
+#
+# The event-driven ready-check (pr-auto-review-reusable.yml) has no catch-up:
+# under a bulk standards-sync convergence it fires while CI is still mid-flight
+# and, once everything goes green, no further event re-evaluates the PR — it
+# strands BLOCKED with all required checks green and no code-owner approval.
+#
+# This scheduled/manual sweep enumerates the open `standards-sync` PRs org-wide
+# and re-invokes the SAME readiness gate → dispatch path for the ready ones
+# (delegated to pr_auto_review_ready, so the #680 cancelled/superseded-non-
+# required tolerance is inherited). It is the missing catch-up for the missed-
+# event case and removes the need for manual `gh run rerun` nudges. A bounded
+# MAX_PER_RUN provides back-pressure so a burst drains over a few cycles rather
+# than firing every dispatch at once (donpetry-bot token/capacity).
+#
+# Runs centrally in petry-projects/.github (the scripts live here); a single
+# `gh search prs` call spans every repo the PAT can see.
+#
+# Requires: GH_PAT_WORKFLOWS org secret (classic PAT, repo scope) for API reads
+# and the repository_dispatch to petry-projects/.github-private.
+name: PR Auto-Review — Catch-up Sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "PR label to sweep"
+        type: string
+        default: "standards-sync"
+      max_per_run:
+        description: "Max PRs to dispatch this run (back-pressure)"
+        type: string
+        default: "8"
+      dry_run:
+        description: "Log intended dispatches without firing them"
+        type: boolean
+        default: true
+  schedule:
+    # Every 15 min — the catch-up interval for a missed-event stall. A PR that
+    # goes all-required-green with no fresh event is picked up within one cycle.
+    - cron: "*/15 * * * *"
+
+permissions: {}
+
+concurrency:
+  group: pr-auto-review-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout sweep tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Sweep open standards-sync PRs and dispatch the ready ones
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          SEARCH_OWNER: ${{ github.repository_owner }}
+          SWEEP_LABEL: ${{ inputs.label || 'standards-sync' }}
+          MAX_PER_RUN: ${{ inputs.max_per_run || '8' }}
+          # Manual runs default to dry-run; scheduled runs are live.
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+        run: bash .github/scripts/pr-auto-review/sweep-dispatch.sh

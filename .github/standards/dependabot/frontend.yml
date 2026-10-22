@@ -1,0 +1,26 @@
+# Dependabot configuration for frontend (npm) repositories
+# Copy to .github/dependabot.yml and adjust directory paths as needed
+#
+# npm uses open-pull-requests-limit: 0 to suppress version update PRs.
+# Dependabot security updates bypass this limit, so security PRs still open.
+version: 2
+updates:
+  # npm — security updates only (limit 0 suppresses version updates)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    labels:
+      - "security"
+      - "dependencies"
+
+  # GitHub Actions — version updates (keep actions current)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "security"
+      - "dependencies"

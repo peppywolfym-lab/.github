@@ -1,0 +1,10 @@
+{
+  "immutable_files": [
+    {
+      "path": ".github/workflows/agent-shield.yml",
+      "reason": "Security boundary — agents cannot weaken security scanning",
+      "requires_human_review": true
+    }
+  ]
+}
+

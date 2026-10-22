@@ -1,0 +1,68 @@
+# Quality gate for the no-LLM PR-limits success-metric report (#510) and its
+# validating bats tests.
+#
+# Triggered on any PR that touches:
+#   - scripts/pr-limits-report.sh
+#   - test/scripts/pr-limits/**
+#   - .github/workflows/pr-limits-report.yml
+#   - .github/workflows/pr-limits-report-tests.yml
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for the report script
+#   2. bats       — unit tests for the report's counting + status logic
+#
+# Context: ADR docs/initiatives/pull-request-limits-adr.md; the report reuses the
+# admission-gate counting semantics (scripts/lib/pr-limit-gate.sh, #561) so the
+# two agree. Modeled on .github/workflows/auto-rebase-tests.yml.
+
+name: PR-limits Report Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/pr-limits-report.sh'
+      - 'test/scripts/pr-limits/**'
+      - '.github/workflows/pr-limits-report.yml'
+      - '.github/workflows/pr-limits-report-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/pr-limits-report.sh'
+      - 'test/scripts/pr-limits/**'
+      - '.github/workflows/pr-limits-report.yml'
+      - '.github/workflows/pr-limits-report-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-limits-report-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          # Read-only test job — never pushes; don't leave the token in git config.
+          persist-credentials: false
+
+      - name: Install bats, shellcheck, and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning -x scripts/pr-limits-report.sh
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure test/scripts/pr-limits/pr-limits-report.bats

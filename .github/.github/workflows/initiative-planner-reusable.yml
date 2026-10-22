@@ -1,0 +1,108 @@
+# Reusable Initiative Planner — Approval Trigger workflow.
+# Single source of truth for the org: all idea→initiative dispatch logic lives
+# here. Repo-level initiative-planner.yml files are thin caller stubs.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+#
+# Fires when a maintainer adds the `idea:approved` label to an Ideas Discussion
+# in a fleet repo. It does NOT plan inline — the BMAD Scrum Master (Bob) and the
+# vendored BMAD frameworks live centrally in petry-projects/.github-private, and
+# claude-code-action aborts on `discussion` event contexts ("Unsupported event
+# type: discussion"). So this reusable resolves the discussion number and
+# re-dispatches the CENTRAL initiative-planner via workflow_dispatch, passing the
+# CALLER repo as `target_repo` so Bob reads that repo's Discussion and
+# materializes the epic + sub-issue DAG there. The `idea:approved` label stays
+# the human gate; the dispatch is an invisible bridge.
+#
+# IMPORTANT — the dispatch requires a PAT, not GITHUB_TOKEN:
+#   GitHub does not start new workflow runs from a workflow_dispatch fired with
+#   the default GITHUB_TOKEN (loop prevention). The dispatch MUST use a PAT with
+#   workflow scope (GH_PAT_WORKFLOWS), the same constraint documented in
+#   petry-projects/.github-private scripts/initiative-planner/redispatch.sh.
+#
+# Requires:
+#   GH_PAT_WORKFLOWS — org secret, classic PAT (repo + workflow scope) used to
+#                      dispatch the central planner and resolve trust.
+name: Initiative Planner — Approval Trigger (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      planner_repo:
+        description: "owner/repo hosting the central initiative-planner.yml workflow."
+        required: false
+        default: "petry-projects/.github-private"
+        type: string
+    secrets:
+      GH_PAT_DON_PETRY:
+        description: "Canonical org PAT — preferred over GH_PAT_WORKFLOWS when present"
+        required: false
+      GH_PAT_WORKFLOWS:
+        description: "Classic PAT with repo + workflow scope used to dispatch the central initiative-planner (GITHUB_TOKEN cannot start a workflow_dispatch run)."
+        required: true
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only fire on the `idea:approved` label, and only when a trusted maintainer
+    # added it. requested actors below MEMBER/OWNER/COLLABORATOR must never be
+    # able to spend planning quota by labelling a Discussion.
+    if: >-
+      github.event_name == 'discussion' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'idea:approved'
+    permissions: {}
+    steps:
+      - name: Guard — PAT present
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::GH_PAT_DON_PETRY (or legacy GH_PAT_WORKFLOWS) is required — a workflow_dispatch fired with GITHUB_TOKEN will not start a run."
+            exit 1
+          fi
+
+      - name: Guard — trusted actor
+        id: trust
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          # Only admin/write collaborators may approve an idea for planning.
+          # The discussion `labeled` payload carries no author_association, so
+          # query the collaborator permission API (.permission: admin|write|read|none).
+          PERM=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null || echo "none")
+          case "$PERM" in
+            admin|write)
+              echo "Actor @${ACTOR} has permission ${PERM} — trusted."
+              echo "trusted=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::warning::Actor @${ACTOR} has permission ${PERM} — not trusted; not dispatching the planner."
+              echo "trusted=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Dispatch central planner for this repo
+        if: steps.trust.outputs.trusted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          PLANNER_REPO: ${{ inputs.planner_repo }}
+          TARGET_REPO: ${{ github.repository }}
+          DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
+        run: |
+          # Validate the discussion number before it reaches the gh command line.
+          if ! [[ "${DISCUSSION_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::discussion number must be a positive integer, got: '${DISCUSSION_NUMBER}'"
+            exit 1
+          fi
+          echo "idea:approved on ${TARGET_REPO} discussion #${DISCUSSION_NUMBER} → dispatching central planner in ${PLANNER_REPO}."
+          gh workflow run initiative-planner.yml \
+            --repo "${PLANNER_REPO}" \
+            -f discussion="${DISCUSSION_NUMBER}" \
+            -f target_repo="${TARGET_REPO}" \
+            -f dry_run=false
+          echo "Dispatched initiative-planner.yml (discussion=${DISCUSSION_NUMBER}, target_repo=${TARGET_REPO}, dry_run=false)."

@@ -1,0 +1,72 @@
+# Quality gates for the standards release-channel cut tooling and its pure core.
+#
+# `standards/` is consumed by other repos as a versioned artifact (issue #1091).
+# scripts/cut-standards-release.sh publishes it as an immutable standards/vX.Y.Z
+# release + a moving standards/v<major>-stable channel; scripts/lib/standards-
+# release.sh is the side-effect-free decision core (tag naming, N-1 selection,
+# refuse-to-clobber). This workflow gates both, mirroring canary-rollout-tests.yml.
+#
+# Triggered on any PR (or push to main) that touches:
+#   - scripts/cut-standards-release.sh   (orchestrator)
+#   - scripts/lib/standards-release.sh   (pure decision core)
+#   - tests/standards_release.bats       (the suite)
+#   - .github/workflows/standards-release-tests.yml (this file)
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for the orchestrator + pure core
+#   2. bats       — the full standards_release unit/behaviour suite
+
+name: Standards-release Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/cut-standards-release.sh'
+      - 'scripts/lib/standards-release.sh'
+      - 'tests/standards_release.bats'
+      - '.github/workflows/standards-release-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/cut-standards-release.sh'
+      - 'scripts/lib/standards-release.sh'
+      - 'tests/standards_release.bats'
+      - '.github/workflows/standards-release-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standards-release-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install bats, shellcheck, and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning -x scripts/cut-standards-release.sh scripts/lib/standards-release.sh
+
+      - name: Run bats suite
+        # The suite stubs gh/git via PATH; a dummy token satisfies the
+        # orchestrator's token precondition without any real API access.
+        env:
+          GH_TOKEN: dummy-token-for-stubbed-tests
+        run: bats --print-output-on-failure tests/standards_release.bats

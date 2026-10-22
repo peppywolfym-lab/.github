@@ -1,0 +1,98 @@
+# Reusable Dependabot auto-merge workflow — single source of truth for the org.
+# Repo-level dependabot-automerge.yml files call this to avoid duplicating
+# eligibility logic and the GitHub App token dance.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/dependabot-policy.md
+#
+# Auto-approves and enables auto-merge for Dependabot PRs that are:
+#   - GitHub Actions updates (any version bump, including major)
+#   - Security updates for any ecosystem (patch or minor)
+#   - Indirect (transitive) dependency updates
+# Major version updates for non-Actions ecosystems are left for human review.
+# Uses --auto so the merge waits for all required CI checks to pass.
+#
+# Safety model: application ecosystems use open-pull-requests-limit: 0 in
+# dependabot.yml, so the only app-ecosystem PRs Dependabot can create are
+# security updates. This workflow adds defense-in-depth by also checking
+# the package ecosystem.
+#
+# Required org/repo secrets (passed via `secrets: inherit` from caller):
+#   APP_ID         — GitHub App ID with contents:write and pull-requests:write
+#   APP_PRIVATE_KEY — GitHub App private key
+name: Dependabot auto-merge (Reusable)
+
+on:
+  workflow_call:
+    secrets:
+      APP_ID:
+        description: "GitHub App ID with contents:write and pull-requests:write"
+        required: true
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key"
+        required: true
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+          skip-commit-verification: true
+
+      - name: Determine if auto-merge eligible
+        id: eligible
+        run: |
+          UPDATE_TYPE="${{ steps.metadata.outputs.update-type }}"
+          DEP_TYPE="${{ steps.metadata.outputs.dependency-type }}"
+          ECOSYSTEM="${{ steps.metadata.outputs.package-ecosystem }}"
+
+          # GitHub Actions are SHA-pinned and don't affect app runtime,
+          # so all version bumps (including major) are eligible.
+          # App ecosystem PRs can only exist as security updates (limit: 0)
+          # and must be patch/minor/indirect — major requires human review.
+          if [[ "$ECOSYSTEM" != "github_actions" && \
+                "$UPDATE_TYPE" != "version-update:semver-patch" && \
+                "$UPDATE_TYPE" != "version-update:semver-minor" && \
+                "$DEP_TYPE" != "indirect" ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping: major update for $ECOSYSTEM requires human review"
+            exit 0
+          fi
+
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "Auto-merge eligible: ecosystem=$ECOSYSTEM update=$UPDATE_TYPE"
+
+      - name: Check app secrets
+        if: steps.eligible.outputs.eligible == 'true'
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+        run: |
+          if [[ -z "$APP_ID" ]]; then
+            echo "::error::APP_ID secret is missing. Set APP_ID and APP_PRIVATE_KEY in org secrets. See standards/dependabot-policy.md"
+            exit 1
+          fi
+
+      - name: Generate app token
+        if: steps.eligible.outputs.eligible == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Approve and enable auto-merge
+        if: steps.eligible.outputs.eligible == 'true'
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}

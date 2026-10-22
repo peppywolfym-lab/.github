@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/petry-projects/.github/standards/personas/persona.schema.json",
+  "title": "Agentic Persona Manifest",
+  "description": "The single index-of-record for one agentic persona. It ties together the persona's identity, the definition layer(s) that implement it, the skills it uses, its trigger surface, its trust/permission posture, its eval gate, and a pointer to its canary-rings entry. The manifest does NOT duplicate ring membership or gate knobs — those live in petry-projects/.github standards/canary-rings.json (the single source of truth). See standards/persona-standards.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "name", "title", "summary", "status", "owner", "definition", "triggers", "trust"],
+  "allOf": [
+    {
+      "if": {
+        "required": ["runtime"],
+        "properties": {
+          "runtime": {
+            "required": ["reusable"]
+          }
+        }
+      },
+      "then": {
+        "required": ["canary"]
+      },
+      "description": "A persona that ships a dedicated reusable workflow (runtime.reusable) MUST carry a canary block for ring registration. See ADR-0006."
+    },
+    {
+      "if": {
+        "required": ["canary"]
+      },
+      "then": {
+        "required": ["runtime"],
+        "properties": {
+          "runtime": {
+            "required": ["reusable"]
+          }
+        }
+      },
+      "description": "A persona with a canary block MUST declare runtime.reusable — shared-runtime personas served by the persona-runner MUST omit canary entirely. See ADR-0006."
+    },
+    {
+      "if": {"properties": {"status": {"const": "stable"}}, "required": ["status"]},
+      "then": {"required": ["evals"], "description": "A persona at status 'stable' MUST carry an evals block (the held-out gate). See persona-standards.md §1."}
+    },
+    {
+      "if": {
+        "required": ["triggers"],
+        "properties": {
+          "triggers": {
+            "required": ["surfaces"],
+            "properties": {
+              "surfaces": {
+                "contains": {
+                  "required": ["surface", "enabled"],
+                  "properties": {"surface": {"const": "mention"}, "enabled": {"const": true}}
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {"required": ["address"], "description": "A persona that enables the 'mention' surface MUST declare how it is addressed. See persona-standards.md §4.1."}
+    }
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Manifest schema version. Bump only when the schema shape changes in a backwards-incompatible way; additive optional fields stay at v1."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Stable kebab-case identifier. MUST be a ROLE, never a person name — 'qa-lead', not 'murat' (persona-standards.md §1.6). MUST equal the persona directory name, the addressing team slug in `address.handle`, AND the channel-tag agent name used in canary-rings.json (e.g. 'qa-lead', 'dev-lead')."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human display name for the ROLE (e.g. 'QA Lead', 'Dev Lead'). MUST NOT be a person name, even when this persona wraps an upstream framework agent that has one. Upstream agents are referenced ONLY by their technical skill id (definition.layers[].framework.skill, e.g. 'bmad-tea'); their persona names are upstream's business and are not mirrored here. See persona-standards.md §1.6."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Role title (e.g. 'Master Test Architect & Quality Advisor')."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 10,
+      "description": "One-sentence statement of what this persona is for."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "canary", "ring0", "ring1", "stable", "retired"],
+      "description": "Lifecycle stage. 'draft' = not yet cut; canary/ring0/ring1/stable mirror the furthest channel this persona has been promoted to; 'retired' = decommissioned."
+    },
+    "owner": {
+      "type": "string",
+      "pattern": "^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "description": "Owning team in 'org/team' form (matches CODEOWNERS). Team-based ownership only, per codeowners-standard.md."
+    },
+    "definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where and how the persona is actually implemented. A persona MUST declare at least one layer. Per persona-standards.md §Definition, the manifest is the unifier ON TOP of these layers — it points at them, it does not replace them.",
+      "required": ["layers"],
+      "properties": {
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ordered list of definition layers that implement this persona.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "path"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["framework-agent", "copilot-profile", "workflow-prompts", "gh-aw"],
+                "description": "framework-agent: a vendored framework agent (BMAD etc.). copilot-profile: an agents/<name>.md profile. workflow-prompts: a prompts/<persona>/ library driven by a shell orchestrator. gh-aw: a GitHub Agentic Workflow .md compiled to a .lock.yml."
+              },
+              "path": {
+                "type": "string",
+                "description": "Repo-relative path to the layer's root (the SKILL.md dir, the profile .md, the prompts dir, or the gh-aw .md)."
+              },
+              "framework": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Required when kind == 'framework-agent'. Records the upstream provenance and pin so the manifest can point INTO the framework rather than fork it.",
+                "required": ["name", "upstream_repo", "vendor_pin"],
+                "properties": {
+                  "name": {"type": "string", "description": "Framework directory under frameworks/ (e.g. 'bmad-test-architecture')."},
+                  "upstream_repo": {"type": "string", "description": "Upstream source repo (e.g. 'bmad-code-org/bmad-method-test-architecture-enterprise')."},
+                  "vendor_pin": {"type": "string", "description": "Vendored version/tag, MUST match the framework's VENDOR.md (e.g. 'v1.19.0')."},
+                  "skill": {"type": "string", "description": "The framework skill/agent id backing this persona (e.g. 'bmad-tea'). This is the ONLY handle we keep on an upstream agent: a technical id, never the persona name upstream may give it. If you need to know what upstream calls it, read upstream."}
+                }
+              },
+              "local_overrides": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Local customization applied on top of a vendored layer (never hand-edit vendored files). Overrides that would benefit upstream should be flagged for contribution back.",
+                "required": ["path", "upstream_candidate"],
+                "properties": {
+                  "path": {"type": "string", "description": "Repo-relative path to the override file(s) (e.g. a customize.toml overlay or an orchestration wrapper)."},
+                  "upstream_candidate": {"type": "boolean", "description": "true if this override is a general improvement that SHOULD be proposed back to the upstream framework rather than kept local forever."},
+                  "notes": {"type": "string"}
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"kind": {"const": "framework-agent"}}},
+                "then": {"required": ["framework"]}
+              }
+            ]
+          }
+        }
+      }
+    },
+    "address": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How a human addresses this persona from a comment (`@<handle>`). REQUIRED when the 'mention' surface is enabled. See persona-standards.md §4.1. There is deliberately NO `aliases` field — see §4.1.1 'Renames'.",
+      "required": ["handle"],
+      "properties": {
+        "handle": {
+          "type": "string",
+          "pattern": "^petry-projects/[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "The addressing handle in 'org/team-slug' form, mentioned as '@org/team-slug'. MUST be an org TEAM, never a user account: GitHub's user namespace is global and first-come, so a bare '@qa-lead' resolves to an unrelated real account and notifies a stranger on every mention (verified: qa-lead, dev-lead, scrum-master are all live accounts). An org team slug cannot collide. The slug MUST equal `id`, so routing is a prefix-strip — which also makes handle uniqueness a theorem rather than a check (org is pinned, slug == id, id == the persona directory name, directory names are unique). Team must be privacy 'closed' (secret teams are unmentionable) with notification_setting 'notifications_disabled'; those are live properties CI verifies, not shape this schema can check."
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "description": "Capabilities the persona can invoke, consumed by path (vendor-neutral). Advisory index for humans; the authoritative wiring is inside the definition layers.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "path", "source"],
+        "properties": {
+          "name": {"type": "string"},
+          "path": {"type": "string"},
+          "source": {"type": "string", "enum": ["vendored", "first-party"]}
+        }
+      }
+    },
+    "triggers": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The trigger matrix — the checklist of every surface this persona may act on. Per persona-standards.md §Triggers, default is advisory (read-only) everywhere; write access is opt-in per surface and MUST carry a gate label and a trust floor.",
+      "required": ["default_mode", "opt_out_label", "surfaces"],
+      "properties": {
+        "default_mode": {
+          "type": "string",
+          "enum": ["advisory", "off"],
+          "description": "The mode for any surface not explicitly listed. MUST be 'advisory' or 'off' — write is never a default, only an explicit per-surface opt-in."
+        },
+        "opt_out_label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Label that opts an item out of this persona entirely (convention: '<id>:hands-off')."
+        },
+        "surfaces": {
+          "type": "array",
+          "description": "Per-surface trigger declarations.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["surface", "enabled", "mode"],
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": ["issues", "pull_request", "pull_request_review", "discussion", "check_run", "schedule", "mention"],
+                "description": "The work-item surface / GitHub event family."
+              },
+              "events": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Specific event actions in scope (e.g. ['opened','labeled'] for issues)."
+              },
+              "enabled": {"type": "boolean"},
+              "mode": {
+                "type": "string",
+                "enum": ["advisory", "write"],
+                "description": "advisory: comments/reviews/labels only, no code changes. write: opens/pushes PRs or mutates repo content."
+              },
+              "gate_label": {
+                "type": "string",
+                "minLength": 1,
+                "description": "REQUIRED when mode == 'write': the label that arms the persona on this surface (e.g. 'dev-lead')."
+              },
+              "trust_floor": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"]},
+                "description": "Minimum author_association allowed to trigger on this surface. Defaults to trust.author_association_floor when omitted."
+              },
+              "bridge": {
+                "type": "string",
+                "description": "Optional repository_dispatch/workflow_dispatch bridge type when the surface cannot run the agent inline (e.g. 'discussion' events)."
+              },
+              "notes": {"type": "string"}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"mode": {"const": "write"}}},
+                "then": {"required": ["gate_label"]}
+              }
+            ]
+          }
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Trust boundary applied before the persona consumes agent quota.",
+      "required": ["author_association_floor"],
+      "properties": {
+        "author_association_floor": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "enum": ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"]},
+          "description": "The default set of author associations allowed to trigger the persona. Convention: [OWNER, MEMBER, COLLABORATOR]."
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity"],
+      "description": "How the persona is wired into CI. Optional for advisory-only personas that run entirely inside an existing workflow.",
+      "properties": {
+        "host": {"type": "string", "description": "Repo that owns the reusable (matches canary-rings.json host)."},
+        "reusable": {"type": "string", "description": "Repo-relative path to the reusable workflow, if any."},
+        "caller_stub": {"type": "string", "description": "Repo-relative path to the thin caller stub."},
+        "run_workflow": {"type": "string", "description": "Display name of the workflow whose run history feeds the health gate. MUST match canary-rings.json run_workflow for this id."},
+        "permissions": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "The full permission set the reusable requests. The caller stub MUST grant a superset of this or the fleet gets startup_failure."
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The GitHub account this persona ACTS AS at runtime — the login it commits/pushes/reviews/comments as, and the Actions secret holding that account's PAT. This is deliberately distinct from `address.handle` (the org TEAM humans @-mention): the handle routes a mention, the identity authenticates the work. Making it declarative here is what stops two personas from silently sharing one machine user via a single `vars.BOT_USER` variable (the dev-lead→donpetry-bot regression). The runtime resolves `BOT_USER` from `identity.account`; CI asserts the workflow's credential reference matches `identity.credential`. The companion validator (`validate-personas.py`) further enforces that `credential` follows the `GH_PAT_<ACCOUNT>[_<QUALIFIER>]` naming convention (where `<ACCOUNT>` is the login upper-snake-cased), while accepting grandfathered account-named secrets such as `DON_PETRY_BOT_GH_PAT`.",
+          "required": ["account", "credential"],
+          "properties": {
+            "account": {
+              "type": "string",
+              "maxLength": 39,
+              "pattern": "^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$",
+              "description": "GitHub login this persona acts as (commits/pushes/reviews/comments). A user or machine-user account, NOT a team. e.g. 'don-petry' (dev-lead) or 'donpetry-bot' (pr-review)."
+            },
+            "credential": {
+              "type": "string",
+              "pattern": "^(?!GITHUB_)[A-Z][A-Z0-9_]*$",
+              "description": "Name of the GitHub Actions secret holding `account`'s PAT. Convention: GH_PAT_<ACCOUNT>[_<QUALIFIER>] with <ACCOUNT> the login upper-snake-cased (e.g. GH_PAT_DON_PETRY). Pre-existing account-named secrets (e.g. DON_PETRY_BOT_GH_PAT) are grandfathered. Must not start with `GITHUB_` (GitHub blocks creation of secrets with that prefix)."
+            }
+          }
+        }
+      }
+    },
+    "evals": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The held-out eval gate. A persona MUST NOT reach 'stable' (or its declared required_before ring) without an eval set carrying at least min_cases held-out cases — validate-personas.py enforces the count once status reaches required_before. See evals/README.md (dev/holdout split, holdout-guard.yml). Declare EITHER `path` (one eval set) OR `paths` (several, for a persona that wraps multiple skills — e.g. pr-review's deep-review + triage sets); exactly one of the two.",
+      "required": ["required_before", "min_cases"],
+      "oneOf": [
+        {"required": ["path"]},
+        {"required": ["paths"]}
+      ],
+      "properties": {
+        "required_before": {
+          "type": "string",
+          "enum": ["ring0", "ring1", "stable"],
+          "description": "The ring by which the eval set(s) must exist and pass. Recommended: 'stable' at minimum."
+        },
+        "path": {"type": "string", "description": "Single eval set — repo-relative path holding dev/ and holdout/ splits. Canonically 'evals/<id>/' so it inherits validate-cases.py + holdout-guard.yml. Use this OR `paths`, not both."},
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string"},
+          "description": "Several eval sets, one per skill the persona wraps (e.g. ['evals/deep-review/', 'evals/triage/']). Each holds dev/ + holdout/ splits and must independently clear min_cases. Use this OR `path`, not both. The manifest points at the skill-keyed sets that already exist; it does not fork them."
+        },
+        "judge": {"type": "string", "description": "Path to the judge rubric (e.g. 'evals/judge.md')."},
+        "min_cases": {"type": "integer", "minimum": 1, "description": "Minimum held-out cases required in EACH eval set before promotion to required_before. Enforced by validate-personas.py."}
+      }
+    },
+    "canary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "OPTIONAL pointer to the ring registry, for a persona that ships its OWN reusable. Per ADR-0006 (.github-private docs/architecture/adr/0006-shared-runtime-personas-are-not-ring-registered.md) a persona served wholly by the SHARED persona runtime (the persona-mention router dispatching to persona-runner) is NOT individually ring-registered — no caller pins a per-persona channel tag — and MUST OMIT this block rather than point at a registry entry that does not exist. Include it only when the persona ships a dedicated reusable, in which case ADR-0002 applies in full. This manifest MUST NOT restate rings, members, or gate knobs — only reference the registry entry by id.",
+      "required": ["registry", "agent"],
+      "properties": {
+        "registry": {
+          "type": "string",
+          "description": "Path to the canonical ring registry (petry-projects/.github standards/canary-rings.json)."
+        },
+        "agent": {
+          "type": "string",
+          "description": "The agents.<key> in canary-rings.json for this persona. MUST equal `id`."
+        }
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Relevant docs, ADRs, or issues (e.g. the ADR that introduced this persona)."
+    }
+  }
+}

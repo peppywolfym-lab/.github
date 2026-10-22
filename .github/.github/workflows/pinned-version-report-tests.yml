@@ -1,0 +1,63 @@
+# Quality gate for scripts/pinned-version-report.sh and its bats suite.
+#
+# Triggered on any PR (or push to main) that touches:
+#   - scripts/pinned-version-report.sh
+#   - test/scripts/pinned-version-report/**
+#   - .github/workflows/pinned-version-report-tests.yml (this file)
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for the report script
+#   2. bats       — pin-resolution, drift-detection, and fan-out table tests
+
+name: Pinned-version-report Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/pinned-version-report.sh'
+      - 'test/scripts/pinned-version-report/**'
+      - '.github/workflows/pinned-version-report-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/pinned-version-report.sh'
+      - 'test/scripts/pinned-version-report/**'
+      - '.github/workflows/pinned-version-report-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinned-version-report-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install bats, shellcheck, and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning -x scripts/pinned-version-report.sh
+
+      - name: Run bats suite
+        # The suite stubs gh via PATH; a dummy token satisfies the script's
+        # GH_TOKEN precondition without any real API access.
+        env:
+          GH_TOKEN: dummy-token-for-stubbed-tests
+        run: bats --print-output-on-failure test/scripts/pinned-version-report/

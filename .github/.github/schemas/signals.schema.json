@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/petry-projects/.github/blob/main/.github/schemas/signals.schema.json",
+  "$comment": "version: 1.0.0 — must match SCHEMA_VERSION in collect-signals.sh; enforced by bats",
+  "title": "Feature Ideation Signals",
+  "description": "Canonical contract between collect-signals.sh and the BMAD Analyst (Mary) prompt. Any change to this schema is a breaking change to the workflow.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scan_date",
+    "repo",
+    "open_issues",
+    "closed_issues_30d",
+    "ideas_discussions",
+    "releases",
+    "merged_prs_30d",
+    "feature_requests",
+    "bug_reports",
+    "truncation_warnings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "scan_date": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$"
+    },
+    "open_issues": {
+      "$ref": "#/$defs/issueBucket"
+    },
+    "closed_issues_30d": {
+      "$ref": "#/$defs/issueBucket"
+    },
+    "ideas_discussions": {
+      "type": "object",
+      "required": ["count", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/discussion" }
+        }
+      }
+    },
+    "releases": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/release" }
+    },
+    "merged_prs_30d": {
+      "type": "object",
+      "required": ["count", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pullRequest" }
+        }
+      }
+    },
+    "feature_requests": {
+      "$ref": "#/$defs/issueBucket"
+    },
+    "bug_reports": {
+      "$ref": "#/$defs/issueBucket"
+    },
+    "truncation_warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "limit", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "source": { "type": "string" },
+          "limit": { "type": "integer", "minimum": 0 },
+          "message": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "issueBucket": {
+      "type": "object",
+      "required": ["count", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/issue" }
+        }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "required": ["number", "title", "labels"],
+      "additionalProperties": true,
+      "properties": {
+        "number": { "type": "integer" },
+        "title": { "type": "string" },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" }
+            }
+          }
+        },
+        "createdAt": { "type": "string" },
+        "closedAt": { "type": ["string", "null"] },
+        "author": {
+          "type": ["object", "null"],
+          "properties": {
+            "login": { "type": "string" }
+          }
+        }
+      }
+    },
+    "discussion": {
+      "type": "object",
+      "required": ["id", "number", "title"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "number": { "type": "integer" },
+        "title": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "labels": {
+          "type": "object",
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "comments": {
+          "type": "object",
+          "properties": {
+            "totalCount": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["tagName"],
+      "additionalProperties": true,
+      "properties": {
+        "tagName": { "type": "string" },
+        "name": { "type": ["string", "null"] },
+        "publishedAt": { "type": "string" },
+        "isPrerelease": { "type": "boolean" }
+      }
+    },
+    "pullRequest": {
+      "type": "object",
+      "required": ["number", "title"],
+      "additionalProperties": true,
+      "properties": {
+        "number": { "type": "integer" },
+        "title": { "type": "string" },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "name": { "type": "string" } }
+          }
+        },
+        "mergedAt": { "type": "string" }
+      }
+    }
+  }
+}

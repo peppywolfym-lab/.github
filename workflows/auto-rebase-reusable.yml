@@ -1,0 +1,234 @@
+# Reusable auto-rebase workflow — single source of truth for the org.
+# Repo-level auto-rebase.yml files call this to avoid duplicating
+# the branch-update logic.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+#
+# Problem: when branch protection requires branches to be up-to-date
+# (strict status checks), merging any PR makes other open PRs fall behind.
+# Non-Dependabot PRs have no equivalent of Dependabot's scheduled rebase,
+# so they silently fall behind until a human notices.
+#
+# Solution: after every push to main (typically a merged PR), this workflow:
+#   1. Finds all open non-Dependabot PRs from the same repo (no fork PRs)
+#   2. Keeps only the PRs eligible under the `eligibility` input (default
+#      `all`: every behind PR, including drafts)
+#   3. Updates the remaining behind PRs using the merge method (not rebase)
+#
+# The eligibility predicate lives in
+# .github/scripts/auto-rebase/lib/eligibility.sh (unit-tested via bats) and is
+# selectable via the `eligibility` input so a future "front-of-queue N" variant
+# needs no change to this file.
+#
+# Skips Dependabot PRs — those are handled by dependabot-rebase-reusable.yml.
+# Skips fork PRs — update-branch requires push access to the head branch.
+#
+# Important: never use the API update-branch endpoint with rebase method —
+# it rewrites SHAs, which can confuse CI and invalidate existing approvals.
+# The merge method preserves the original commits.
+#
+# Failure modes handled gracefully:
+#   - without `workflows` permission (403): posts an idempotent comment asking
+#     the author to rebase manually (sentinel: <!-- auto-rebase-blocked -->)
+#   - merge conflict (422): posts an idempotent comment noting that dev-lead will
+#     attempt an agentic rebase (sentinel: <!-- auto-rebase-conflict -->), which
+#     triggers the rebase intent in dev-lead.yml
+#
+# Secrets: GH_PAT_WORKFLOWS is optional but required for the rebase sentinel
+# to trigger dev-lead. Sentinel comments posted with GITHUB_TOKEN do not fire
+# issue_comment workflow runs (GitHub limitation). When the PAT is absent the
+# sentinel is still posted but dev-lead will not be scheduled.
+# No auto-merge logic.
+name: Auto-rebase non-Dependabot PRs (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      eligibility:
+        description: |
+          Which behind PRs to update:
+            all (default) — every behind PR, including drafts.
+          New modes can be added to lib/eligibility.sh and selected here without
+          changing this workflow.
+        required: false
+        default: 'all'
+        type: string
+      ready_label:
+        description: |
+          Deprecated — this input is accepted but silently ignored so callers
+          that were passing it (when eligibility: review-ready was supported)
+          continue to dispatch without a GitHub Actions validation error.
+          Remove it from your caller when convenient.
+        required: false
+        default: ''
+        type: string
+      tooling_ref:
+        description: |
+          Ref of petry-projects/.github to source the auto-rebase scripts from.
+          Leave empty (the default) to source them from THIS reusable's own
+          commit (`github.job_workflow_sha`) — that guarantees the predicate in
+          lib/eligibility.sh always matches the version of this workflow the
+          caller pinned, with no skew. (Previously defaulted to `v1`, which
+          predates eligibility.sh and made every run fail with "No such file
+          or directory" — see issue #465.) Override only to test a fork/PR
+          branch (`tooling_ref: my-branch`) end-to-end.
+        required: false
+        default: ''
+        type: string
+    secrets:
+      GH_PAT_DON_PETRY:
+        description: "Canonical org PAT — preferred over GH_PAT_WORKFLOWS when present"
+        required: false
+      GH_PAT_WORKFLOWS:
+        description: "PAT with workflows scope — required for sentinel comment to trigger dev-lead rebase"
+        required: false
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  auto-rebase:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # needed for update-branch (may touch .github/workflows/)
+      pull-requests: write # needed to post comments on PRs
+    steps:
+      - name: Checkout auto-rebase tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: petry-projects/.github
+          # Source the scripts from this reusable's own commit so the predicate
+          # always matches the pinned workflow version. `job_workflow_sha` is the
+          # commit SHA of THIS reusable file for the run; `tooling_ref` overrides
+          # it only for end-to-end testing of a branch.
+          ref: ${{ inputs.tooling_ref || github.job_workflow_sha }}
+          path: .auto-rebase-tooling
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Update behind non-Dependabot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS || github.token }}
+          HAS_PAT: ${{ (secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS) != '' }}
+          REPO: ${{ github.repository }}
+          ELIGIBILITY: ${{ inputs.eligibility }}
+        run: |
+          # shellcheck source=/dev/null
+          . .auto-rebase-tooling/.github/scripts/auto-rebase/lib/eligibility.sh
+          # shellcheck source=/dev/null
+          . .auto-rebase-tooling/.github/scripts/auto-rebase/lib/comments.sh
+
+          # Find open non-Dependabot PRs from the same repo (exclude forks)
+          PRS=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
+            --jq '.[] | select(.user.login != "dependabot[bot]") | select(.head.repo != null) | select(.head.repo.full_name == .base.repo.full_name) | "\(.number) \(.head.ref)"')
+
+          if [[ -z "$PRS" ]]; then
+            echo "No open non-Dependabot same-repo PRs"
+            exit 0
+          fi
+
+          while IFS=' ' read -r PR_NUMBER HEAD_REF; do
+            BASE_BRANCH=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.base.ref')
+
+            # Eligibility gate: which behind PRs to update, selectable via the
+            # `eligibility` input (default `all` — every behind PR).
+            ELIG=0
+            auto_rebase_pr_eligible "$ELIGIBILITY" || ELIG=$?
+            if [[ "$ELIG" -eq 2 ]]; then
+              echo "::error::Unknown eligibility mode '$ELIGIBILITY'"
+              exit 1
+            fi
+            if [[ "$ELIG" -ne 0 ]]; then
+              echo "PR #$PR_NUMBER ($HEAD_REF) not eligible under '$ELIGIBILITY' — skipping"
+              continue
+            fi
+
+            BEHIND=$(gh api "repos/$REPO/compare/${BASE_BRANCH}...${HEAD_REF}" \
+              --jq '.behind_by')
+
+            if [[ "$BEHIND" -eq 0 ]]; then
+              echo "PR #$PR_NUMBER ($HEAD_REF) is up to date — skipping"
+              continue
+            fi
+
+            echo "PR #$PR_NUMBER ($HEAD_REF) is $BEHIND commit(s) behind $BASE_BRANCH — updating branch"
+
+            # Capture both stdout and stderr; use if-then to avoid bash -e terminating
+            # the step on non-zero exit before we can inspect the error message.
+            if UPDATE_OUTPUT=$(gh api "repos/$REPO/pulls/$PR_NUMBER/update-branch" \
+              -X PUT -f update_method=merge 2>&1); then
+              if [[ -n "$UPDATE_OUTPUT" ]]; then echo "$UPDATE_OUTPUT"; fi
+              echo "  Branch updated"
+            else
+              echo "  Update failed: $UPDATE_OUTPUT"
+
+              if echo "$UPDATE_OUTPUT" | grep -qF "without \`workflows\` permission"; then
+                # GitHub blocks update-branch when merging the base would add
+                # .github/workflows/ changes and the token lacks the 'workflows'
+                # permission. Ask the author to rebase manually.
+                #
+                # Idempotent: skip if sentinel comment already exists.
+                SENTINEL="<!-- auto-rebase-blocked -->"
+                ALREADY_POSTED=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+                  --json comments --jq "[.comments[] | select(.body | contains(\"$SENTINEL\"))] | length")
+                if [[ "$ALREADY_POSTED" -gt 0 ]]; then
+                  echo "  Skipping — blocked comment already posted"
+                else
+                  echo "  Posting manual-rebase request (workflows permission missing)"
+                  BLOCKED_BODY="<!-- auto-rebase-blocked -->"
+                  BLOCKED_BODY+=$'\n'"**Auto-rebase blocked** — the base branch contains \`.github/workflows/\` changes"
+                  BLOCKED_BODY+=" that require the \`workflows\` permission to merge into this branch,"
+                  BLOCKED_BODY+=" but the auto-rebase workflow's token does not have that permission."
+                  BLOCKED_BODY+=$'\n\n'"Please rebase this branch manually:"
+                  BLOCKED_BODY+=$'\n'"\`\`\`"$'\n'"git fetch origin"
+                  BLOCKED_BODY+=$'\n'"git rebase origin/$BASE_BRANCH"
+                  BLOCKED_BODY+=$'\n'"git push --force-with-lease"$'\n'"\`\`\`"
+                  auto_rebase_post_comment_best_effort "$PR_NUMBER" "$REPO" "$BLOCKED_BODY"
+                fi
+              elif echo "$UPDATE_OUTPUT" | grep -qi "merge conflict"; then
+                # Merge conflict — post the sentinel to trigger dev-lead rebase.
+                # gh api surfaces the GitHub API error JSON: {"message":"merge conflict",...}
+                #
+                # Re-trigger strategy: embed the current BASE_BRANCH HEAD SHA in
+                # the sentinel so we can detect whether the base has moved. If an
+                # existing sentinel already carries the same SHA, skip delete+repost
+                # (avoiding cancellation of an in-flight dev-lead rebase run). Only
+                # delete and re-post when the base HEAD has changed (new conflict).
+                BASE_SHA=$(gh api "repos/$REPO/git/ref/heads/$BASE_BRANCH" --jq '.object.sha')
+                SENTINEL_PREFIX="<!-- auto-rebase-conflict:"
+                SENTINEL="${SENTINEL_PREFIX}${BASE_SHA} -->"
+                SAME_SHA_COUNT=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+                  --json comments --jq "[.comments[] | select(.body | contains(\"$SENTINEL\")) | .databaseId] | length")
+                if [[ "$SAME_SHA_COUNT" -gt 0 ]]; then
+                  echo "  Sentinel already posted for base SHA $BASE_SHA, skipping to avoid cancelling active rebase"
+                else
+                  OLD_COMMENT_IDS=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+                    --json comments --jq "[.comments[] | select(.body | contains(\"$SENTINEL_PREFIX\")) | .databaseId] | .[]")
+                  for OLD_ID in $OLD_COMMENT_IDS; do
+                    echo "  Deleting stale sentinel comment $OLD_ID"
+                    gh api "repos/$REPO/issues/comments/$OLD_ID" -X DELETE || true
+                  done
+                  echo "  Posting conflict resolution request"
+                  CONFLICT_BODY="$SENTINEL"
+                  CONFLICT_BODY+=$'\n'"**Auto-rebase failed — merge conflict** — this branch has conflicts"
+                  CONFLICT_BODY+=" with \`$BASE_BRANCH\` that must be resolved."
+                  if [[ "$HAS_PAT" == "true" ]]; then
+                    CONFLICT_BODY+=$'\n\n'"dev-lead will attempt to resolve this automatically. If it cannot, a"
+                    CONFLICT_BODY+=" follow-up comment will explain what needs manual attention."
+                    CONFLICT_BODY+=$'\n\n'"To resolve manually instead:"
+                  else
+                    CONFLICT_BODY+=$'\n\n'"Please resolve this manually"
+                    CONFLICT_BODY+=" (automatic resolution requires \`GH_PAT_WORKFLOWS\` to be configured):"
+                  fi
+                  CONFLICT_BODY+=$'\n'"\`\`\`"$'\n'"git fetch origin"
+                  CONFLICT_BODY+=$'\n'"git merge origin/$BASE_BRANCH"
+                  CONFLICT_BODY+=$'\n'"# resolve conflicts, then:"
+                  CONFLICT_BODY+=$'\n'"git add ."$'\n'"git commit"$'\n'"git push"$'\n'"\`\`\`"
+                  # Best-effort: a comment-side failure (e.g. GitHub's 2500-comment
+                  # cap) must not abort the step and starve the other PRs of a
+                  # rebase (issue #594) — it is logged and swallowed instead.
+                  auto_rebase_post_comment_best_effort "$PR_NUMBER" "$REPO" "$CONFLICT_BODY"
+                fi
+              else
+                echo "  Warning: failed to update PR #$PR_NUMBER — $UPDATE_OUTPUT"
+              fi
+            fi
+          done <<< "$PRS"

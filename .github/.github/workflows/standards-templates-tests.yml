@@ -1,0 +1,51 @@
+# Quality gate for the caller-stub templates under standards/workflows/.
+#
+# Triggered on any PR that touches:
+#   - standards/workflows/**            (a template pin changed)
+#   - test/scripts/standards-templates/** (the guard itself changed)
+#
+# Gate: bats — every deployable template pins its major-scoped
+#       `<agent>/v<M>-stable` channel and never the bare `<agent>/stable` form.
+
+name: Standards Templates Tests
+
+on:
+  pull_request:
+    paths:
+      - 'standards/workflows/**'
+      - 'test/scripts/standards-templates/**'
+      - '.github/workflows/standards-templates-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'standards/workflows/**'
+      - 'test/scripts/standards-templates/**'
+      - '.github/workflows/standards-templates-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standards-templates-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Install bats
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure test/scripts/standards-templates/

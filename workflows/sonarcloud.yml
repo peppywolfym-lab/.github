@@ -1,0 +1,36 @@
+# SonarCloud code quality, maintainability, and security hotspot scanning.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#3-sonarcloud-analysis-sonarcloudyml
+name: SonarCloud Analysis
+
+permissions: {}
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sonarcloud:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # First attempt. continue-on-error lets the retry step below recover from
+      # transient 403/5xx responses from binaries.sonarsource.com (the scanner
+      # CLI download), without failing the job on a single CDN blip.
+      - name: SonarCloud Scan
+        id: sonar
+        if: ${{ env.SONAR_TOKEN != '' }}
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        continue-on-error: true
+      - name: SonarCloud Scan (retry)
+        if: ${{ env.SONAR_TOKEN != '' && steps.sonar.outcome == 'failure' }}
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2

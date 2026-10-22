@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Fake `gh` binary for the pr-review-mention ack tests.
+#
+# Its only job is to capture the value passed to `--body` verbatim so a test can
+# assert on the exact acknowledgement text the workflow would post — in
+# particular that it never contains a literal `@donpetry-bot` self-mention.
+#
+# Recognized vars:
+#   GH_BODY_FILE  — file to write the `--body` value to (verbatim, no quoting)
+#   GH_STUB_LOG   — optional append-only argv log (shell-quoted via %q)
+#   GH_STUB_EXIT  — exit code (default 0)
+
+set -euo pipefail
+
+if [ -n "${GH_STUB_LOG:-}" ]; then
+  # shellcheck disable=SC2059
+  printf '%q ' "$@" >>"$GH_STUB_LOG"
+  printf '\n' >>"$GH_STUB_LOG"
+fi
+
+if [ -n "${GH_BODY_FILE:-}" ]; then
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--body" ]; then
+      printf '%s' "$arg" >"$GH_BODY_FILE"
+      break
+    fi
+    prev="$arg"
+  done
+fi
+
+exit "${GH_STUB_EXIT:-0}"

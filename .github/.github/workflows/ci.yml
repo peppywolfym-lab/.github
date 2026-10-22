@@ -1,0 +1,222 @@
+# CI pipeline for the .github standards repository.
+# Lints markdown, YAML, GitHub Actions, shell scripts, and runs AgentShield.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    # Bound the job so a hung step (a network fetch that stalls without refusing
+    # the connection, a stuck pip/npx) fails fast instead of grinding to GitHub's
+    # 360-minute default — the long-tail behind the fleet failure-rate/p95
+    # warning (issue #986). See test/workflows/ci/install-resilience.bats.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Lint Markdown
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: '**/*.md'
+
+      # if: always() — run every lint sub-step regardless of prior failures so PR
+      # authors see every lint issue in one CI run instead of fix→push→discover
+      # one more in the next run. The job still fails if any sub-step fails, so
+      # the `Lint` status check (referenced by branch protection) is unchanged.
+      - name: Lint YAML
+        if: always()
+        run: |
+          # Bounded retries + a per-attempt timeout so a transient PyPI/index
+          # blip retries instead of reding the Lint job (guards the fleet
+          # failure-rate metric — see test/workflows/ci/install-resilience.bats,
+          # issue #935).
+          pip install --quiet --retries 3 --timeout 30 --require-hashes --only-binary :all: -r scripts/ci-yamllint-requirements.txt
+          yamllint -c <(cat <<'YAMLLINTRC'
+          extends: default
+          rules:
+            line-length:
+              max: 200
+            truthy:
+              check-keys: false
+            document-start: disable
+            comments:
+              min-spaces-from-content: 1
+            indentation:
+              spaces: 2
+          YAMLLINTRC
+          ) .github/workflows/ standards/workflows/ standards/dependabot/
+
+      - name: Lint GitHub Actions
+        if: always()
+        run: |
+          # Install actionlint via verified download (pinned version + checksum)
+          ACTIONLINT_VERSION="1.7.7"
+          ACTIONLINT_SHA="023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+          # Bounded retries so a transient GitHub Releases 5xx / connection blip
+          # retries instead of failing the job (guards the fleet failure-rate
+          # metric — see test/workflows/ci/install-resilience.bats, issue #894).
+          curl -sSfL --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 60 \
+            --retry 3 --retry-delay 2 --retry-connrefused --retry-all-errors \
+            -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA}  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+          rm actionlint.tar.gz
+          # Lint our own workflow files (fail on errors, ignore shellcheck style hints)
+          # `job_workflow_sha` is a valid reusable-workflow context property; actionlint 1.7.7 schema omits it
+          ./actionlint -ignore 'SC2129' -ignore '"job_workflow_sha" is not defined' .github/workflows/*.yml
+          # Template workflows use placeholder expressions — informational only
+          ./actionlint -ignore 'context' standards/workflows/*.yml || true
+
+      - name: Lint scheduled workflow timing
+        if: always()
+        # Fail any workflow whose cron fires on the top of the hour (minute 0).
+        # Standard: standards/ci-standards.md → "Scheduled Workflow Timing".
+        run: bash scripts/check-cron-timing.sh
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run ShellCheck
+        run: |
+          # Recurse so subdirectories like scripts/lib/ (sourceable libraries)
+          # are linted too. -x follows `# shellcheck source=...` directives.
+          shopt -s globstar nullglob
+          shell_files=(scripts/**/*.sh)
+          if [ ${#shell_files[@]} -gt 0 ]; then
+            shellcheck --severity=warning -x "${shell_files[@]}"
+          else
+            echo "No shell scripts found — skipping"
+          fi
+
+  # Informational self-validation of THIS repo's canonical AGENTS.md against the
+  # standalone structural linter (scripts/agents-md-lint.sh, Phase 2 of epic
+  # #642). Phase 3 (#646) runs it on every PR in the linter's default
+  # INFORMATIONAL mode: each structural finding surfaces as a GitHub ::warning::
+  # annotation, but the job never fails the build. This job is deliberately NOT a
+  # branch-protection required status check — promotion to a blocking/required
+  # check (--mode failing + branch protection) is deferred to Phase 4. Do NOT add
+  # it to branch protection or pass --mode failing while it remains informational.
+  # See test/workflows/ci/agents-md-selfcheck.bats.
+  agents-md-selfcheck:
+    name: AGENTS.md Self-Check (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Lint canonical AGENTS.md (informational)
+        # Default (informational) mode always exits 0 — structural findings
+        # surface as ::warning:: annotations without failing the build, mirroring
+        # run-bats.sh's non-fatal-signal convention. Do NOT pass --mode failing:
+        # promoting this to a blocking/required check is Phase 4 (see job header).
+        run: |
+          bash scripts/agents-md-lint.sh AGENTS.md \
+            | while IFS=$'\t' read -r severity rule line message; do
+                [ -n "$rule" ] || continue
+                if [ "$line" = "-" ] || [ -z "$line" ]; then
+                  echo "::warning file=AGENTS.md::[${severity}] ${rule}: ${message}"
+                else
+                  echo "::warning file=AGENTS.md,line=${line}::[${severity}] ${rule}: ${message}"
+                fi
+              done
+
+  agent-security:
+    name: Agent Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+
+      - name: Run AgentShield
+        # npm's default of 2 fetch retries is thin for the npx package download.
+        # Bump it via npm's native fetch-retries config so a transient npm-registry
+        # blip retries instead of reding the job (guards the fleet failure-rate
+        # metric — see test/workflows/ci/install-resilience.bats, issue #935).
+        # An env var (not a shell loop) so a genuine high-severity finding still
+        # fails on the first run instead of being retried.
+        env:
+          npm_config_fetch_retries: '3'
+          npm_config_fetch_retry_mintimeout: '2000'
+          npm_config_fetch_retry_maxtimeout: '30000'
+          npm_config_fetch_timeout: '60000'
+        run: |
+          npx --ignore-scripts ecc-agentshield@1.4.0 scan --path . --format json --min-severity high
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `gh release download` pulls from GitHub Releases (redirects to
+          # objects.githubusercontent.com) and has no native retry — the same
+          # transient-blip failure mode #894 fixed for the actionlint curl. Wrap
+          # in a bounded retry loop with backoff so a transient error retries
+          # instead of reding the Secret scan job (guards the fleet failure-rate
+          # metric — see test/workflows/ci/install-resilience.bats, issue #935).
+          downloaded=0
+          for attempt in 1 2 3; do
+            if timeout 30 gh release download v8.30.1 --repo gitleaks/gitleaks --pattern 'gitleaks_8.30.1_linux_x64.tar.gz' --output /tmp/gitleaks.tar.gz --clobber; then
+              downloaded=1
+              break
+            fi
+            echo "gitleaks download attempt ${attempt} failed" >&2
+            [ "${attempt}" -lt 3 ] && sleep $((attempt * 5))
+          done
+          if [ "${downloaded}" -ne 1 ]; then
+            echo "gitleaks download failed after 3 attempts" >&2
+            exit 1
+          fi
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+
+      - name: Run gitleaks
+        # --config .gitleaks.toml is required: without it gitleaks uses its
+        # default ruleset, whose generic-api-key rule false-positives on certain
+        # filenames and reds this job intermittently (issue #996). The repo ships
+        # .gitleaks.toml at root; see standards/push-protection.md Layer 3.
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose --exit-code 1

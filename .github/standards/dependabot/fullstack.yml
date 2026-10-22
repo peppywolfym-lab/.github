@@ -1,0 +1,51 @@
+# Dependabot configuration for full-stack repositories (npm + Go + Terraform)
+# Copy to .github/dependabot.yml and adjust directory paths as needed
+#
+# Application ecosystems use open-pull-requests-limit: 0 to suppress version
+# update PRs. Dependabot security updates bypass this limit.
+#
+# Example layout:
+#   apps/mobile/package.json  (or markets-app/package.json)
+#   apps/api/go.mod           (or markets-api/go.mod)
+#   infra/terraform/main.tf
+version: 2
+updates:
+  # npm — security updates only (limit 0 suppresses version updates)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    labels:
+      - "security"
+      - "dependencies"
+
+  # Go modules — security updates only (limit 0 suppresses version updates)
+  - package-ecosystem: "gomod"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    labels:
+      - "security"
+      - "dependencies"
+
+  # Terraform — security updates only (limit 0 suppresses version updates)
+  - package-ecosystem: "terraform"
+    directory: "/infra/terraform"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    labels:
+      - "security"
+      - "dependencies"
+
+  # GitHub Actions — version updates (keep actions current)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "security"
+      - "dependencies"

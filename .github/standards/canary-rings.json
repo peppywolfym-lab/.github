@@ -1,0 +1,1149 @@
+{
+  "version": 1,
+  "description": "Ring membership for agent canary rollout (initiative #495, issues #500/#501). The promotion automation (scripts/canary-rollout.sh) reads this as the single source of truth. `next` is host-relative: it resolves to the repo that HOSTS the reusable; `ring0` covers the other org-infra repo (the host already sits in `next`).",
+  "org_infra_repos": [
+    "petry-projects/.github",
+    "petry-projects/.github-private"
+  ],
+  "member_tokens": {
+    "$host": "the agent's host repo (the repo that owns the reusable)",
+    "$org_infra": "org_infra_repos minus the host (the host is already in `next`)",
+    "*": "every other consumer not named in an earlier ring"
+  },
+  "_agent_ref_paths_note": "agent_ref_paths (#1019): the host-relative paths a consumer EXECUTES at its pinned channel tag BEYOND the reusable workflow blob — the reusable checks these out at `agent_ref` (e.g. scripts/, prompts/, personas/). autocut's change detection and the `drift` ship-drift report watch the reusable PLUS these paths, so a script-only change is no longer invisible (a merged-but-not-shipped change reaches nobody). This top-level list is the fleet default; an agent may override with `.agents[<a>].agent_ref_paths`. Patterns ending in `/` match by directory prefix.",
+  "agent_ref_paths": [
+    "scripts/",
+    "prompts/",
+    "personas/"
+  ],
+  "_autocut_note": "autocut (#1069): `canary-rollout.sh autocut` (gated by org var CANARY_AUTO_CUT) auto-cuts a new immutable <agent>/vX.Y.Z + moves `next` when a reusable's blob on its host main HEAD differs from the current `next` candidate. Since #712 (epic #1083 pillar 2) the bump is DETECTED from the change: a conventional-commit `!`/`BREAKING CHANGE` or a `workflow_call` interface break (removed/renamed input|secret, or a newly-required input) → major (seeding a fresh v<newMAJOR>-next per #657 F4); a non-breaking `feat` → minor; else patch. The optional `.agents[<a>].autocut.bump` knob (patch|minor|major) is now an OVERRIDE that forces a level (not the sole source); it fails safe to patch on any signal-fetch error.",
+  "agents": {
+    "dev-lead": {
+      "host": "petry-projects/.github-private",
+      "reusable": ".github/workflows/dev-lead-reusable.yml",
+      "run_workflow": "Dev-Lead Agent",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "$host"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "$org_infra"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [
+          {
+            "id": "dependabot-context-dispatch",
+            "workflow": "Dev-Lead Agent",
+            "step": "[Dd]ependabot",
+            "reason": "#864/#668 \u2014 a Dev-Lead run dispatched in a Dependabot context receives no Actions secrets and fails at startup, before any candidate code executes; inherently version-independent (can never be candidate-caused), so excluded even when the candidate changed the reusable (differs=1).",
+            "version_independent": true
+          },
+          {
+            "id": "fix-review-git-push-permission",
+            "workflow": "Dev-Lead Agent",
+            "step": "[Pp]ush",
+            "reason": "fix-review git push denied by branch protection / missing write scope; version-independent benign failure, not a candidate regression."
+          }
+        ],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "suspect_failure_classes": [
+          {
+            "id": "workload-timeout",
+            "workflow": "Dev-Lead Agent",
+            "step": "Stage timeout|exit code 124|rebase-conflict-sentinel",
+            "reason": "#664/#668 \u2014 a dev-lead run can exit 124 when a stage exceeds its time budget (large workload, or a rebase-conflict sentinel that never resolves). This is *possibly* candidate-caused (a candidate that changed execution-time-sensitive code could genuinely be slower), so unlike a version_independent benign class it is NOT auto-cleared \u2014 it BLOCKS as SUSPECT and carries a discriminating question for a fast human confirm.",
+            "guidance": "Did this candidate change execution-time-sensitive code, or is it a large-workload/rebase timeout unrelated to the diff? If unrelated \u2192 `promote --override`; if the candidate got materially slower \u2192 treat as a real regression and roll back.",
+            "auto_downgrade": {
+              "min_baseline_sample": 10,
+              "margin_permille": 100
+            }
+          }
+        ],
+        "_suspect_note": "suspect_failure_classes (#668 increment 2): same shape as benign classes (`id`, `workflow` ERE, `step` ERE) plus a `guidance` discriminating question. A counted (non-benign) failure that matches a suspect class at differs=1 is triaged SUSPECT instead of REGRESSION \u2014 it still BLOCKS and still needs a human (labelled `needs-human`, NOT auto-cleared like `version_independent`), but the blocker issue renders the `guidance` so the human confirm is a 30-second check rather than a from-scratch investigation. Default-absent (this key omitted) = today's behavior, byte-identical for agents that do not opt in.",
+        "_confirm_note": "require_confirmation (#668 increment 3, Layer 3): opt-in human go/no-go at ONE ring boundary for a correctness-sensitive agent. When a transition sets `require_confirmation: true` and the reliability verdict is otherwise PROMOTE, the frontier holds in state AWAITING_CONFIRMATION \u2014 the scheduled promote-all never auto-advances it; a deliberate `promote <agent> --confirm` dispatch (Actions-audit-logged) does. The confirmation IS the dispatch (no state store). `--confirm` is NOT `--override`: it advances ONLY a reliability-clean AWAITING_CONFIRMATION state and can never bypass a BLOCKED gate. sync-issues files an evidence-carrying `canary-confirm:<agent>` issue (compare diff link + run stats; labelled `needs-human`) that auto-closes on promote or candidate change. dev-lead only initially; reliability still clears next/ring0/ring1 unattended. Default-absent (this key omitted) = fully autonomous, byte-identical for agents that do not opt in.",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1,
+            "require_confirmation": true
+          }
+        }
+      }
+    },
+    "agent-shield": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/agent-shield-reusable.yml",
+      "run_workflow": "AgentShield",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "auto-rebase": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/auto-rebase-reusable.yml",
+      "run_workflow": "Auto-rebase non-Dependabot PRs",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [
+          {
+            "id": "runner-action-resolution-outage",
+            "workflow": "Auto-rebase non-Dependabot PRs",
+            "step": "Set up job",
+            "reason": "#943 \u2014 the run failed at 'Set up job' with 'Failed to resolve action download info: Error: Service Unavailable' while the runner was fetching action metadata from GitHub's backend, retried twice with backoff, then gave up \u2014 entirely before checkout or any candidate reusable step ran. Confirmed environmental: the SAME candidate/failure evaluated for the next->ring0 transition (differs=0 there) was independently auto-triaged PRE_EXISTING, and 14+ surrounding runs on the same candidate all succeeded. NOT version_independent: the matcher (_run_signature) only sees failed step NAMES, never log content, so a bare 'Set up job' signature could equally arise from a candidate breaking the reusable's own YAML (e.g. a bad `uses:` ref failing action resolution) \u2014 matching add-to-project's reusable-setup-restricted-secrets class. This class therefore excludes only at differs=0 (byte-identical candidate) and can never mask a differs=1 regression; a differs=1 occurrence of this exact outage (like #943's ring1->stable) still needs a human `promote --override` with the run evidence."
+          }
+        ],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "dependency-audit": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/dependency-audit-reusable.yml",
+      "run_workflow": "Dependency audit",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "dependabot-automerge": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/dependabot-automerge-reusable.yml",
+      "run_workflow": "Dependabot auto-merge",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "apply-repo-settings": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/apply-repo-settings-reusable.yml",
+      "run_workflow": "Apply repo settings",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/markets",
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 — graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "_cadence_note": "This workflow is weekly-cron (petry-projects/.github#984), so sample floors starve during soak. next->ring0 waives the sample when no caller run exists yet; ring members feed the gate via a manual workflow_dispatch after the stub lands. Do NOT paper over a starved gate with --override.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "dependabot-rebase": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/dependabot-rebase-reusable.yml",
+      "run_workflow": "Dependabot update and merge",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      },
+      "soak_start_ring": "ring0"
+    },
+    "pr-review-mention": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/pr-review-mention-reusable.yml",
+      "run_workflow": "PR Review \u2014 Mention Trigger",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "initiative-planner": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/initiative-planner-reusable.yml",
+      "run_workflow": "Initiative Planner \u2014 Approval Trigger",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "idea-triage": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/idea-triage-reusable.yml",
+      "run_workflow": "Idea Triage \u2014 Weekly Shortlist",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "ci-failure-analyst": {
+      "host": "petry-projects/.github-private",
+      "reusable": ".github/workflows/ci-failure-analyst-reusable.yml",
+      "run_workflow": "CI Failure Analyst",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "$host"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "$org_infra"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "idea-enhancer": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/idea-enhancer-reusable.yml",
+      "run_workflow": "Idea Enhancer \u2014 Enrich Ideas",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "feature-ideation": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/feature-ideation-reusable.yml",
+      "run_workflow": "Feature Research & Ideation (BMAD Analyst)",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "add-to-project": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/add-to-project-reusable.yml",
+      "run_workflow": "Auto-add to Initiatives project",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [
+          {
+            "id": "reusable-setup-restricted-secrets",
+            "workflow": "Auto-add to Initiatives project",
+            "step": "Set up job",
+            "reason": "#701/#668 \u2014 the caller (Auto-add to Initiatives project) triggers on pull_request_target/issues and passes required INITIATIVES_APP_* secrets to the called reusable; in a restricted-secret context (e.g. a Dependabot-authored event) GitHub withholds those Actions secrets, so the called workflow fails at 'Set up job' at startup, before any candidate reusable step runs. Environmental/pre-existing, not a candidate regression. NOT version_independent: a 'Set up job' signature could also arise from a candidate breaking the reusable's own YAML, so this excludes only at differs=0 (byte-identical) and can never mask a differs=1 regression."
+          }
+        ],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "pr-auto-review": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/pr-auto-review-reusable.yml",
+      "run_workflow": "PR Auto-Review \u2014 Ready Check",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "correctness": {
+          "decision_step_prefix": "decision: ",
+          "min_candidate_sample": 10,
+          "min_baseline_sample": 20,
+          "max_shift_permille": 400
+        },
+        "_correctness_note": "correctness (#668 increment 4, Layer 2): opt-in DECISION telemetry on organic runs \u2014 the actual correctness signal. pr-auto-review emits one no-op `decision: <class>` step per outcome branch (dispatched / skip-draft / skip-checks-pending / skip-changes-requested / skip-unresolved-threads); only the taken branch runs, the rest skip. The engine tallies the candidate's decision mix on the source tier (per-candidate window) against a prior-version baseline (source tier, pre-cut trailing window) \u2014 both read from `gh run view --json jobs` step names, prefix-matched by `decision_step_prefix`. `decide_decision_shift` returns OK|SHIFT|INSUFFICIENT: INSUFFICIENT (either sample below its min, or absent/unparseable decision steps) is a NO-OP that degrades to reliability-only, so low-traffic agents never stall on a signal they can't produce; SHIFT (any decision class's share moves \u2265 max_shift_permille per-mille) HOLDS the promotion with triage SUSPECT (correctness variant) and sync-issues renders a candidate-vs-baseline decision-mix table in the blocker issue; OK is a no-op. Never rolls back, never auto-acts \u2014 SHIFT only holds (worst case: a few hours of human latency). Gross always/never/gross shifts only, by design (n=10\u201325). Default-absent (this key omitted) = today's behaviour, byte-identical for agents that do not opt in.",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "persona-mention": {
+      "host": "petry-projects/.github",
+      "reusable": ".github/workflows/persona-mention-reusable.yml",
+      "run_workflow": "Persona \u2014 Mention Router",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "petry-projects/.github-private"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "petry-projects/.github"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 \u2014 graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail \u2014 but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 \u2014 reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    },
+    "pr-review": {
+      "_note": "petry-projects/.github#1166 — the ring-0 self-host reviewer (#497). Its engine reusable `pr-review.yml` (grandfathered legacy name, #1127) lives in .github-private and is dogfooded there on `pr-review/next` via the `pr-review-trigger.yml` caller stub. It was absent from the registry, so autocut never cut/advanced its channel and a merged fix sat inert on main until a human ran cut-release.sh (two incidents in three days). run_workflow is the caller stub's DISPLAY NAME (the `name:` of pr-review-trigger.yml), NOT the engine or a *.yml filename: a workflow_call-only reusable has no runs of its own, so the gate reads the caller's run history via `gh run list --workflow`. It must be the display name because a repo without this workflow (every tier beyond the .github-private self-host) then returns the graceful 'could not find any workflows named …' (→ [], #747), whereas a *.yml filename would 404 and be mis-triaged as a transient fetch failure that fails the gate CLOSED. Registered host-relative like dev-lead/ci-failure-analyst: `next` = the host, so `next`+`ring0` span both org-infra repos. The self-host circular dependency (#497) is bounded by the soak gate — a candidate that breaks reviews on `next` (.github-private) fails there and is BLOCKED, never reaching ring0/stable.",
+      "host": "petry-projects/.github-private",
+      "reusable": ".github/workflows/pr-review.yml",
+      "caller_stub": ".github/workflows/pr-review-trigger.yml",
+      "run_workflow": "PR Review Agent — Trigger",
+      "rings": [
+        {
+          "channel": "next",
+          "order": 0,
+          "members": [
+            "$host"
+          ]
+        },
+        {
+          "channel": "ring0",
+          "order": 1,
+          "members": [
+            "$org_infra"
+          ]
+        },
+        {
+          "channel": "ring1",
+          "order": 2,
+          "members": [
+            "petry-projects/TalkTerm",
+            "petry-projects/bmad-bgreat-suite"
+          ]
+        },
+        {
+          "channel": "stable",
+          "order": 3,
+          "members": [
+            "*"
+          ]
+        }
+      ],
+      "gate": {
+        "_standard": "petry-projects/.github#548 — graduated dwell/sample gate over a per-candidate cumulative window. These are registry-configurable per-transition knobs; the values below are the #548 defaults.",
+        "baseline_window_days": 14,
+        "baseline_spike_cap_multiple": 3,
+        "benign_failure_classes": [],
+        "control": {
+          "allow_pre_existing": false
+        },
+        "_benign_note": "benign_failure_classes (#1025 P2): per-reusable allowlist matched against a failed run's workflow name (`workflow` ERE) + failed-step signature (`step` ERE, matched via `gh run view`). Matches are excluded from cum_fail — but ONLY when the candidate's reusable is byte-identical to the prior channel (differs=0), so the allowlist can never mask a candidate-introduced regression. Exception (#668): a class marked `version_independent: true` fails before/independent of the candidate's own code (e.g. a Dependabot-context secrets failure at startup) and can NEVER be candidate-caused, so it is excluded even when differs=1 — reserve the flag for classes where that is provable from the failure mechanism, not merely likely. `control.allow_pre_existing`, or `promote --allow-pre-existing`, advances a BLOCKED+PRE_EXISTING frontier (never REGRESSION).",
+        "transitions": {
+          "next->ring0": {
+            "dwell_hours": 4,
+            "sample_fraction_permille": 250,
+            "sample_clamp_min": 3,
+            "sample_clamp_max": 15,
+            "waive_sample_if_no_caller": true
+          },
+          "ring0->ring1": {
+            "dwell_hours": 8,
+            "waive_sample": true
+          },
+          "ring1->stable": {
+            "dwell_hours": 12,
+            "sample_min": 1
+          }
+        }
+      }
+    }
+  },
+  "unmanaged": {}
+}

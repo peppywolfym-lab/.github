@@ -1,0 +1,186 @@
+# Reusable Dependabot update-and-merge workflow — single source of truth for the org.
+# Repo-level dependabot-rebase.yml files call this to avoid duplicating
+# the rebase/merge serialization logic.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/dependabot-policy.md
+#
+# Problem: when branch protection requires branches to be up-to-date
+# (strict status checks), merging one Dependabot PR makes the others fall
+# behind. Dependabot does not auto-rebase PRs that are merely behind — it
+# only rebases on its next scheduled run or when there are merge conflicts.
+# Additionally, GitHub auto-merge (--auto) may not trigger when rulesets
+# cause mergeable_state to report "blocked" even though all requirements
+# are actually met.
+#
+# Solution: after every push to main (typically a merged PR), this workflow:
+#   1. Calls the GitHub update-branch API with the APP_TOKEN on behind
+#      Dependabot PRs. This adds a merge commit from main onto the PR branch,
+#      bringing it up to date. CI triggers normally because the APP_TOKEN is
+#      a GitHub App installation token — NOT the repository's GITHUB_TOKEN,
+#      which is the only token subject to GitHub's recursive-trigger guard.
+#   2. Merges any Dependabot PR that is up-to-date and passing required CI.
+#
+# Why update-branch with APP_TOKEN (not GITHUB_TOKEN or @dependabot rebase):
+#   - GITHUB_TOKEN: GitHub's recursive-trigger guard prevents events from
+#     GITHUB_TOKEN from creating new workflow runs, so CI never runs.
+#   - @dependabot rebase: Dependabot only processes this command from user
+#     accounts with push access. GitHub App bots (even with contents:write)
+#     are rejected with "Sorry, only users with push access can use that
+#     command."
+#   - APP_TOKEN: A GitHub App installation token is treated as a distinct
+#     identity. Pushes via APP_TOKEN trigger CI workflow runs normally and
+#     are not subject to the GITHUB_TOKEN recursive-trigger guard.
+#
+# Note: update-branch uses the merge method (default), which adds a merge
+# commit on top of the PR branch rather than force-pushing. This preserves
+# Dependabot's original commits as parents. The automerge workflow may fail
+# its dependabot/fetch-metadata verification step (since the latest commit
+# is not from Dependabot), but this is safe — the rebase workflow merges
+# directly via the APP_TOKEN bypass actor and does not rely on the automerge
+# workflow's re-approval.
+#
+# Required org/repo secrets (passed explicitly by caller via secrets: mapping):
+#   APP_ID         — GitHub App ID with contents:write and pull-requests:write
+#   APP_PRIVATE_KEY — GitHub App private key
+name: Dependabot update and merge (Reusable)
+
+on:
+  workflow_call:
+    secrets:
+      APP_ID:
+        description: "GitHub App ID with contents:write and pull-requests:write"
+        required: true
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key"
+        required: true
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  update-and-merge:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Check app secrets
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+        run: |
+          if [[ -z "$APP_ID" ]]; then
+            echo "::error::APP_ID secret is missing. Set APP_ID and APP_PRIVATE_KEY in org secrets. See standards/dependabot-policy.md"
+            exit 1
+          fi
+
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Update and merge Dependabot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Find open Dependabot PRs
+          PRS=$(gh pr list --repo "$REPO" --author "app/dependabot" \
+            --json number,headRefName \
+            --jq '.[] | "\(.number) \(.headRefName)"')
+
+          if [[ -z "$PRS" ]]; then
+            echo "No open Dependabot PRs"
+            exit 0
+          fi
+
+          MERGED=false
+
+          while IFS=' ' read -r PR_NUMBER HEAD_REF; do
+            # Branch may be transiently unavailable (race: PR list fetched before
+            # branch delete propagates). Skip gracefully instead of crashing.
+            if ! BEHIND=$(gh api "repos/$REPO/compare/main...$HEAD_REF" \
+              --jq '.behind_by' 2>/dev/null); then
+              echo "  Skipping PR #$PR_NUMBER — branch $HEAD_REF not found, skipping"
+              continue
+            fi
+
+            if [[ "$BEHIND" -gt 0 ]]; then
+              echo "PR #$PR_NUMBER ($HEAD_REF) is $BEHIND commit(s) behind — updating branch"
+
+              # Use APP_TOKEN (not GITHUB_TOKEN) to update the branch.
+              # APP_TOKEN is a GitHub App installation token and is NOT subject
+              # to the GITHUB_TOKEN recursive-trigger guard — CI runs normally.
+              # The merge method (default) adds a merge commit from main,
+              # preserving Dependabot's original commits.
+              if GH_TOKEN="$APP_TOKEN" gh api "repos/$REPO/pulls/$PR_NUMBER/update-branch" \
+                -X PUT 2>/dev/null; then
+                echo "  Updated branch for PR #$PR_NUMBER"
+                continue  # wait for CI on updated branch before merging
+              fi
+
+              # update-branch failed (e.g. App lacks 'workflows' permission when
+              # main contains workflow file changes, or there is a merge conflict).
+              # Fall through to the direct merge attempt. The bypass actor
+              # (bypass_mode: always) can call the merge API directly when the
+              # branch is behind, provided:
+              #   - The PR's own CI has already passed, AND
+              #   - strict_required_status_checks_policy is false for this repo.
+              # If strict up-to-date checking IS enforced (strict: true), this
+              # fallback will also fail — granting the App the 'workflows'
+              # permission so update-branch succeeds is the correct fix.
+              echo "  Warning: could not update branch for PR #$PR_NUMBER — will attempt direct merge"
+            else
+              echo "PR #$PR_NUMBER ($HEAD_REF) is up to date — checking if merge-ready"
+            fi
+
+            # Skip if we already merged one (strict mode means others are now behind)
+            if [[ "$MERGED" == "true" ]]; then
+              echo "  Skipping — already merged a PR this run"
+              continue
+            fi
+
+            # Check if auto-merge is enabled (set by the automerge workflow)
+            AUTO_MERGE=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+              --json autoMergeRequest --jq '.autoMergeRequest != null')
+
+            if [[ "$AUTO_MERGE" != "true" ]]; then
+              echo "  Skipping — auto-merge not enabled"
+              continue
+            fi
+
+            # Trust GitHub's MERGEABLE state: it already accounts for all
+            # REQUIRED status checks, review rules, and branch-up-to-date.
+            # Non-required checks (e.g. gitleaks false positives) that happen
+            # to fail do not block merges as long as required checks pass.
+            MERGEABLE=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+              --json mergeable --jq '.mergeable')
+
+            if [[ "$MERGEABLE" != "MERGEABLE" ]]; then
+              echo "  Skipping — not mergeable ($MERGEABLE)"
+              continue
+            fi
+
+            # Also confirm no checks are still in progress — avoids merging
+            # mid-CI when GitHub reports MERGEABLE based on a previous run.
+            CHECKS_PENDING=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+              --json statusCheckRollup | \
+              jq '[.statusCheckRollup[]? | select(.name != null and .status != "COMPLETED")] | length')
+
+            if [[ "$CHECKS_PENDING" -gt 0 ]]; then
+              echo "  Skipping — $CHECKS_PENDING check(s) still pending"
+              continue
+            fi
+
+            echo "  All required checks pass — merging PR #$PR_NUMBER"
+            # Use app token for merge so the resulting push to main is attributed to the
+            # app bot — this triggers the workflow again via push event, enabling the
+            # self-sustaining chain that serializes Dependabot PR merges one at a time.
+            if GH_TOKEN="$APP_TOKEN" gh api "repos/$REPO/pulls/$PR_NUMBER/merge" \
+              -X PUT -f merge_method=squash \
+              --silent; then
+              echo "  Merged PR #$PR_NUMBER"
+              MERGED=true
+            else
+              echo "  Warning: failed to merge PR #$PR_NUMBER"
+            fi
+          done <<< "$PRS"

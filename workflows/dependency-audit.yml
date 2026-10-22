@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/dependency-audit.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md#7-dependency-audit-dependency-audityml
+# Reusable:        petry-projects/.github/.github/workflows/dependency-audit-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All ecosystem-detection and audit logic
+#     lives in the reusable workflow above.
+#   • You MUST NOT change: trigger events, the `uses:` line, or the job name
+#     `dependency-audit` — it composes the required status check
+#     `dependency-audit / Detect ecosystems` (codified in
+#     standards/rulesets/code-quality.json).
+#   • If you need different behaviour (new ecosystem, tool version bump),
+#     open a PR against the reusable in the central repo.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Dependency vulnerability audit — thin caller for the org-level reusable.
+# Required status check: "dependency-audit / Detect ecosystems".
+name: Dependency audit
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    uses: ./.github/workflows/dependency-audit-reusable.yml  # local ref — always current (ring0 dogfood, #541)

@@ -1,0 +1,210 @@
+# OpenSSF Scorecard security posture review for all public repos.
+# Creates/updates/closes GitHub Issues for findings across the org.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#openssf-scorecard-org-scorecardyml
+name: Org Scorecard Review
+# readme-report: Weekly OpenSSF Scorecard security-posture review across public repos; findings tracked as issues.
+
+on:
+  schedule:
+    - cron: '6 9 * * 1'   # Mondays 09:06 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scorecard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Scorecard CLI
+        run: |
+          SCORECARD_VERSION="v5.5.0"
+          SCORECARD_SHA="83b90a05c1540ef1390db1cd5711e5fd04be9c1d8537fb84d39d02092d6a8dff"
+          curl -sLo scorecard.tar.gz "https://github.com/ossf/scorecard/releases/download/${SCORECARD_VERSION}/scorecard_5.5.0_linux_amd64.tar.gz"
+          echo "${SCORECARD_SHA}  scorecard.tar.gz" | sha256sum -c -
+          tar xzf scorecard.tar.gz
+          rm scorecard.tar.gz
+          sudo mv scorecard /usr/local/bin/scorecard
+          chmod +x /usr/local/bin/scorecard
+
+      - name: Run Scorecard across org
+        env:
+          GITHUB_AUTH_TOKEN: ${{ secrets.ORG_SCORECARD_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORG_SCORECARD_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          ORG="petry-projects"
+          SKIP_CHECKS="CII-Best-Practices,Contributors,Fuzzing,Maintained,Packaging,Signed-Releases"
+          RESULTS_DIR=$(mktemp -d)
+          SUMMARY_FILE="$RESULTS_DIR/summary.md"
+
+          echo "# Org Scorecard Report - $(date -u +%Y-%m-%d)" >> "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+          echo "| Repo | Score | Findings |" >> "$SUMMARY_FILE"
+          echo "|------|-------|----------|" >> "$SUMMARY_FILE"
+
+          # Get all public repos
+          REPOS=$(gh repo list "$ORG" --public --limit 100 --json name -q '.[].name')
+
+          for REPO in $REPOS; do
+            echo "::group::Scanning $ORG/$REPO"
+            RESULT_FILE="$RESULTS_DIR/${REPO}.json"
+
+            # Run scorecard
+            # We capture stderr to a separate file to detect parsing errors (malformed workflows)
+            ERROR_LOG="$RESULTS_DIR/${REPO}_error.log"
+            if ! scorecard --repo="github.com/$ORG/$REPO" --format=json > "$RESULT_FILE" 2> "$ERROR_LOG"; then
+              # If scorecard failed, check if it was due to a malformed workflow
+              if grep -q "could not parse as YAML" "$ERROR_LOG"; then
+                echo "::warning::Detected malformed YAML in $ORG/$REPO. Treating as finding."
+                # We'll inject a custom finding into the summary and handle issue creation below
+                AGG_SCORE="0"
+                MALFORMED_WORKFLOW="true"
+              else
+                echo "::warning::Failed to scan $ORG/$REPO"
+                echo "| $REPO | ERROR | Scan failed |" >> "$SUMMARY_FILE"
+                echo "::endgroup::"
+                continue
+              fi
+            else
+              MALFORMED_WORKFLOW="false"
+            fi
+
+            # Extract aggregate score
+            if [ "$MALFORMED_WORKFLOW" = "true" ]; then
+                AGG_SCORE="0"
+            else
+                AGG_SCORE=$(jq -r '.score // "N/A"' "$RESULT_FILE")
+            fi
+
+            # Ensure scorecard label exists
+            gh label create scorecard --repo "$ORG/$REPO" --description "OpenSSF Scorecard finding" --color "d93f0b" --force 2>/dev/null || true
+
+            FINDING_COUNT=0
+            CLOSED_COUNT=0
+            CREATED_COUNT=0
+
+            if [ "$MALFORMED_WORKFLOW" = "true" ]; then
+              # Handle malformed workflow finding
+              CHECK_NAME="Malformed-Workflow"
+              SCORE=0
+              REASON="One or more GitHub workflow files could not be parsed as YAML (see scan logs for details)."
+              DOC_URL="https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions"
+
+              # TDD: Re-use the existing issue logic by providing the variables it expects
+              # We need to simulate a loop iteration or just run the logic once
+              NUM_CHECKS=1
+            else
+              # Process each check directly using jq to avoid large strings in shell loop
+              NUM_CHECKS=$(jq '.checks | length' "$RESULT_FILE")
+            fi
+
+            for i in $(seq 0 $((NUM_CHECKS - 1))); do
+              if [ "$MALFORMED_WORKFLOW" = "false" ]; then
+                ROW=$(jq -c ".checks[$i]" "$RESULT_FILE")
+                CHECK_NAME=$(echo "$ROW" | jq -r '.name')
+                SCORE=$(echo "$ROW" | jq -r '.score')
+                REASON=$(echo "$ROW" | jq -r '.reason')
+                DOC_URL=$(echo "$ROW" | jq -r '.documentation.url // "https://github.com/ossf/scorecard/blob/main/docs/checks.md"')
+              fi
+
+              # Skip non-actionable checks
+              if echo "$SKIP_CHECKS" | grep -q "$CHECK_NAME"; then
+                continue
+              fi
+
+              # Skip checks with score -1 (inconclusive/not applicable)
+              if [ "$SCORE" = "-1" ]; then
+                continue
+              fi
+
+              ISSUE_TITLE="Scorecard: $CHECK_NAME"
+
+              # Search for existing open issue
+              EXISTING_ISSUE=$(gh issue list --repo "$ORG/$REPO" \
+                --label scorecard --state open \
+                --search "\"$ISSUE_TITLE\" in:title" \
+                --json number,title \
+                -q ".[] | select(.title | startswith(\"$ISSUE_TITLE\")) | .number" \
+                | head -1)
+
+              # First-party channel-tag exemption for Pinned-Dependencies (#709).
+              # Our first-party reusable refs deliberately use mutable channel tags
+              # (<agent>/v<M>-<tier>) per ci-standards.md#action-pinning-policy, so
+              # Scorecard permanently docks Pinned-Dependencies and this issue never
+              # reached 10/10 or closed. Third-party ACTION pinning is already
+              # enforced by compliance-audit.sh check_action_pinning (which exempts
+              # first-party) — so an Actions-only Pinned-Dependencies finding is
+              # fully covered elsewhere and is pure noise. Scorecard's detail lines
+              # name the dependency type, so suppress the issue only when ALL of
+              # these hold: (1) at least one "not pinned" detail exists, confirming
+              # the expected detail format is present, and (2) every such detail is a
+              # GitHubAction. Keep it whenever there is a non-Actions gap
+              # (containerImage / pip / npm / go) or when no recognisable detail
+              # lines are found (format changed — errs toward keeping the issue).
+              if [ "$CHECK_NAME" = "Pinned-Dependencies" ] && [ "$SCORE" != "10" ]; then
+                TOTAL_WARN=$(echo "$ROW" | jq -r \
+                  '[.details[]? | select(test("not pinned by hash"; "i"))] | length' \
+                  2>/dev/null || echo "0")
+                NON_ACTION_WARN=$(echo "$ROW" | jq -r \
+                  '[.details[]? | select(test("not pinned by hash"; "i")) | select(test("GitHubAction"; "i") | not)] | length' \
+                  2>/dev/null || echo "1")
+                if [ "${TOTAL_WARN:-0}" -gt 0 ] && [ "${NON_ACTION_WARN:-1}" -eq 0 ]; then
+                  echo "Pinned-Dependencies for $REPO is Actions-only — covered by compliance-audit + deliberate first-party channel tags; suppressing issue (#709)"
+                  if [ -n "$EXISTING_ISSUE" ]; then
+                    EXEMPT_MSG="Auto-closing (accepted exception, #709): this Pinned-Dependencies finding is limited to GitHub Actions refs."
+                    EXEMPT_MSG="$EXEMPT_MSG Third-party action pinning is enforced by \`compliance-audit.sh\` (which exempts first-party),"
+                    EXEMPT_MSG="$EXEMPT_MSG and our first-party reusable refs deliberately use mutable channel tags per \`ci-standards.md#action-pinning-policy\`. No action needed."
+                    gh issue close "$EXISTING_ISSUE" --repo "$ORG/$REPO" --comment "$EXEMPT_MSG"
+                    CLOSED_COUNT=$((CLOSED_COUNT + 1))
+                  fi
+                  continue
+                fi
+              fi
+
+              if [ "$SCORE" -eq 10 ]; then
+                # Check passed - close existing issue if any
+                if [ -n "$EXISTING_ISSUE" ]; then
+                  gh issue close "$EXISTING_ISSUE" --repo "$ORG/$REPO" --comment "Resolved! Score is now 10/10 as of $(date -u +%Y-%m-%d). Finding: $REASON"
+                  CLOSED_COUNT=$((CLOSED_COUNT + 1))
+                fi
+              else
+                # Check failed - create or update issue
+                FINDING_COUNT=$((FINDING_COUNT + 1))
+
+                if [ -z "$EXISTING_ISSUE" ]; then
+                  BODY=$(cat <<HEREDOC
+          ## OpenSSF Scorecard Finding
+
+          **Check:** $CHECK_NAME
+          **Score:** $SCORE / 10
+          **Finding:** $REASON
+
+          ## Remediation
+
+          $DOC_URL
+
+          ## Context
+
+          This issue was automatically created from an [OpenSSF Scorecard](https://github.com/ossf/scorecard) scan on $(date -u +%Y-%m-%d).
+          HEREDOC
+                  )
+                  gh issue create --repo "$ORG/$REPO" --title "$ISSUE_TITLE ($SCORE/10)" --label scorecard --body "$BODY"
+                  CREATED_COUNT=$((CREATED_COUNT + 1))
+                else
+                  # Update existing issue with a comment if score changed
+                  gh issue comment "$EXISTING_ISSUE" --repo "$ORG/$REPO" --body "Weekly update: Score is now **$SCORE/10**. Finding: $REASON"
+                fi
+              fi
+            done
+
+            echo "| [$REPO](https://github.com/$ORG/$REPO) | $AGG_SCORE/10 | $FINDING_COUNT open, $CREATED_COUNT new, $CLOSED_COUNT resolved |" >> "$SUMMARY_FILE"
+            echo "::endgroup::"
+          done
+
+          # Output summary
+          cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+          echo ""
+          echo "---"
+          echo "Scan complete."

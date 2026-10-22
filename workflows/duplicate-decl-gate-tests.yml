@@ -1,0 +1,49 @@
+# Tests for the duplicate-declaration gate (scripts/check-duplicate-decls.sh),
+# the required merge backstop against the #1485 corruption class (#1025 / #1520).
+# Gates: shellcheck (the detector) + bats (shell/markdown/JSON detection behaviour
+# and the audit guard that the repo's own tree stays clean).
+name: Duplicate Decl Gate Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/check-duplicate-decls.sh'
+      - 'test/scripts/duplicate-decl-gate/**'
+      - '.github/workflows/duplicate-decl-gate.yml'
+      - '.github/workflows/duplicate-decl-gate-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/check-duplicate-decls.sh'
+      - 'test/scripts/duplicate-decl-gate/**'
+      - '.github/workflows/duplicate-decl-gate.yml'
+      - '.github/workflows/duplicate-decl-gate-tests.yml'
+
+permissions: {}
+
+concurrency:
+  group: duplicate-decl-gate-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install bats, shellcheck, jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq
+
+      - name: shellcheck
+        run: shellcheck --severity=warning -x scripts/check-duplicate-decls.sh
+
+      - name: bats
+        run: bats --print-output-on-failure test/scripts/duplicate-decl-gate/

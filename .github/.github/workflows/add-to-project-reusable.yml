@@ -1,0 +1,125 @@
+# Reusable auto-add-to-Initiatives-project workflow — single source of truth
+# for the org. Repo-level add-to-project.yml stubs call this so the
+# noise-gate / reconcile logic isn't duplicated per repo.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+#
+# What it does (driven by the caller's triggering event):
+#   - issues → reconcile the issue with the project. Issues are UN-GATED:
+#       every issue is tracked (subject only to the excluded-labels noise
+#       filter); no longer present / excluded → removed.
+#   - pull_request_target → same reconcile, but PRs keep the required-label
+#       gate (default `dev-lead`) so the board isn't flooded with transient
+#       PRs. Qualifying → idempotent add; no longer qualifying → remove.
+#
+# Discussions are NOT tracked. Ideas live in GitHub Discussions; the board
+# tracks Issues (an Epic is a parent Issue with sub-issues). See
+# standards/initiatives-project.md.
+#
+# Auth: mints a fresh installation token per run via
+# actions/create-github-app-token from the `petry-projects-planner` GitHub
+# App. Callers pass the App credentials with `secrets: inherit`:
+#   INITIATIVES_APP_ID, INITIATIVES_APP_PRIVATE_KEY.
+#
+# The scripts live in petry-projects/.github; this workflow checks them out
+# at `agent_ref` so logic AND code run at the one pinned channel version
+# (per the org reusable-workflow versioning standard). The reusable's own
+# self-host caller (petry-projects/.github) passes its commit SHA so it
+# dogfoods the exact version under test (Ring 0).
+#
+# Security note (fork PRs): pull_request_target runs with the App secret in
+# scope, so the add-issue-or-pr job only runs for same-repo PRs
+# (head.repo.fork == false) or PRs whose author is OWNER/MEMBER/COLLABORATOR.
+# A maintainer-labeled PR from an *external fork by an untrusted author* is
+# still skipped here (the gate can't safely evaluate the labeler in an `if:`);
+# add such PRs from the Projects UI. Tracking: petry-projects/.github#415 §4.
+#
+# Tracking: petry-projects/.github#387 (pilot), #415 (multi-repo rollout)
+# Discussion: petry-projects/.github#386
+name: Auto-add to Initiatives project (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project_id:
+        description: "ProjectV2 node ID of the Initiatives project"
+        required: true
+        type: string
+      project_url:
+        description: "Human-readable project URL (logging only)"
+        required: false
+        type: string
+        default: ""
+      required_label:
+        description: "Label an issue/PR must carry to be added"
+        required: false
+        type: string
+        default: "dev-lead"
+      excluded_labels:
+        description: "Comma-separated labels that disqualify an issue/PR even with the required label"
+        required: false
+        type: string
+        default: "compliance-audit,health-check,fleet-tracker,daily-report"
+      agent_ref:
+        description: "Ref of petry-projects/.github to check out the scripts from (pin to add-to-project/stable; self-host passes its SHA)"
+        required: false
+        type: string
+        default: "add-to-project/stable"
+    secrets:
+      INITIATIVES_APP_ID:
+        description: "App ID of the petry-projects-planner GitHub App"
+        required: true
+      INITIATIVES_APP_PRIVATE_KEY:
+        description: "PEM private key for the petry-projects-planner GitHub App"
+        required: true
+
+permissions: {}
+
+jobs:
+  add-issue-or-pr:
+    # pull_request_target carries the App secret, so gate fork PRs: run only
+    # for same-repo PRs or trusted authors. Issues can't set labels their
+    # creator lacks permission for, so they're always eligible.
+    if: >-
+      ${{ github.event_name == 'issues'
+      || (github.event_name == 'pull_request_target'
+          && (github.event.pull_request.head.repo.fork == false
+              || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                 github.event.pull_request.author_association))) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout add-to-project scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: petry-projects/.github
+          ref: ${{ inputs.agent_ref }}
+          path: .add-to-project-src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.INITIATIVES_APP_ID }}
+          private-key: ${{ secrets.INITIATIVES_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Reconcile issue/PR with the project
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_ID: ${{ inputs.project_id }}
+          PROJECT_URL: ${{ inputs.project_url }}
+          # Issues are un-gated (every issue is tracked); PRs keep the
+          # required-label gate. An empty REQUIRED_LABEL means "no required
+          # label" (see add-issue-or-pr.sh::evaluate_noise_gate). The
+          # excluded-labels noise filter still applies to both.
+          REQUIRED_LABEL: ${{ github.event_name != 'issues' && inputs.required_label || '' }}
+          EXCLUDED_LABELS: ${{ inputs.excluded_labels }}
+          LABELS_JSON: ${{ toJson(github.event.issue.labels || github.event.pull_request.labels) }}
+          CONTENT_NODE_ID: ${{ github.event.issue.node_id || github.event.pull_request.node_id }}
+          CONTENT_URL: ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/.add-to-project-src/.github/scripts/add-to-project/add-issue-or-pr.sh"

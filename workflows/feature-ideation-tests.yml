@@ -1,0 +1,116 @@
+# Quality gates for the reusable feature-ideation workflow and its
+# supporting scripts.
+#
+# Triggered on any PR that touches:
+#   - .github/workflows/feature-ideation*.yml
+#   - .github/scripts/feature-ideation/**
+#   - .github/schemas/signals.schema.json
+#   - test/workflows/feature-ideation/**
+#   - standards/workflows/feature-ideation.yml
+#
+# Gates (all must pass before merge):
+#   1. shellcheck   — static analysis for every script in the suite
+#   2. lint-prompt  — direct prompt blocks have no unescaped shell expansions
+#   3. schema check — fixtures validate against signals.schema.json
+#   4. bats         — full unit + integration test suite (~92 tests)
+#
+# Standard: this workflow enforces the contract documented in
+# .github/scripts/feature-ideation/README.md.
+
+name: Feature Ideation Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/feature-ideation*.yml'
+      - '.github/scripts/feature-ideation/**'
+      - '.github/schemas/signals.schema.json'
+      - 'test/workflows/feature-ideation/**'
+      - 'standards/workflows/feature-ideation.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/feature-ideation*.yml'
+      - '.github/scripts/feature-ideation/**'
+      - '.github/schemas/signals.schema.json'
+      - 'test/workflows/feature-ideation/**'
+      - 'standards/workflows/feature-ideation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feature-ideation-tests-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, schema, and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Install bats, shellcheck, and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq
+
+      - name: Install Python jsonschema and PyYAML
+        run: 'pip install --quiet --require-hashes --only-binary :all: -r scripts/feature-ideation-tests-requirements.txt'
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          cd .github/scripts/feature-ideation
+          shellcheck -x \
+            collect-signals.sh \
+            lint-prompt.sh \
+            lint-caller.sh \
+            match-discussions.sh \
+            discussion-mutations.sh \
+            lib/gh-safe.sh \
+            lib/filter-bots.sh \
+            lib/compose-signals.sh \
+            lib/date-utils.sh
+
+      - name: Lint direct prompt blocks
+        run: bash .github/scripts/feature-ideation/lint-prompt.sh
+
+      - name: "Lint caller stubs for the #571 inputs-context startup failure"
+        run: bash .github/scripts/feature-ideation/lint-caller.sh
+
+      - name: Validate schema fixtures
+        run: |
+          set -euo pipefail
+          for fixture in test/workflows/feature-ideation/fixtures/expected/*.signals.json; do
+            base=$(basename "$fixture")
+            if [[ "$base" == INVALID-* ]]; then
+              if python3 .github/scripts/feature-ideation/validate-signals.py \
+                   "$fixture" .github/schemas/signals.schema.json; then
+                echo "::error file=$fixture::expected validation failure but it passed"
+                exit 1
+              fi
+            else
+              python3 .github/scripts/feature-ideation/validate-signals.py \
+                "$fixture" .github/schemas/signals.schema.json
+            fi
+          done
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure test/workflows/feature-ideation/
+
+      - name: Upload bats output on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bats-output
+          path: |
+            test/workflows/feature-ideation/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7

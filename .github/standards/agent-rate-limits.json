@@ -1,0 +1,92 @@
+{
+  "status": "signed-off",
+  "_note": "Human sign-off 2026-09-01 (epic #636 gate; maintainer sign-off comment on #636). This is the machine-readable single source of truth for per-agent-type rate limits, circuit breakers, and the org-wide Claude token-budget breaker. Decision record: docs/initiatives/agent-rate-limits-adr.md (#637). The per-agent-type limits and consecutive-failure breakers are now CONSUMED at dispatch time by scripts/agent-rate-limit-gate.sh (Phase 4, #640): initiative-driver ENFORCES, every other agent type runs log-only. org_wide.token_budget is now wired into that same dispatch path but DISARMED (#1155): scripts/agent-rate-limit-gate.sh consults the session + weekly_all windows, yet the consultation is gated on AGENT_TOKEN_BUDGET_ENABLED which stays unset, and org_wide.token_budget.limits.weekly_all.enabled stays false — so the breaker is inert (byte-identical to per-agent-only behaviour). Arming it (setting the flag with the private telemetry seam, and flipping weekly_all.enabled for the glide-path half) is a separate, deliberately-out-of-scope change (#994). Consumers read values from this single file, never hardcoded.",
+  "_schema_version": 1,
+  "agent_types": {
+    "dev-lead": {
+      "max_concurrent_runs": 3,
+      "max_runtime_minutes": 30,
+      "cooldown_minutes": 5,
+      "daily_run_budget": 50,
+      "circuit_breaker": {
+        "consecutive_failure_threshold": 3,
+        "backoff_minutes": 30
+      },
+      "_note": "PROPOSAL (ADR §6). max_concurrent_runs is the global type cap on top of the existing per-issue/per-PR lanes; cooldown is the quiet interval between issue pickups; daily_run_budget bounds runs per rolling 24h. Whether the concurrency cap is global vs per-repo is deferred to sign-off."
+    },
+    "compliance-audit": {
+      "max_concurrent_runs": 1,
+      "max_runtime_minutes": 30,
+      "cooldown_minutes": 0,
+      "daily_run_budget": 1,
+      "circuit_breaker": {
+        "consecutive_failure_threshold": 3,
+        "backoff_minutes": 60
+      },
+      "_note": "PROPOSAL (ADR §6). Already single-lane, non-cancelling on a weekly cron; cooldown_minutes is 0 (not applicable to a weekly run — encoded as 0, not a faked positive value). daily_run_budget of 1 reflects the weekly cadence."
+    },
+    "feature-ideation": {
+      "max_concurrent_runs": 1,
+      "max_runtime_minutes": 20,
+      "cooldown_minutes": 0,
+      "daily_run_budget": 1,
+      "circuit_breaker": {
+        "consecutive_failure_threshold": 3,
+        "backoff_minutes": 60
+      },
+      "_note": "PROPOSAL (ADR §6). Already single-lane, non-cancelling on a weekly cron; cooldown_minutes is 0 (not applicable to a weekly run). daily_run_budget of 1 reflects the weekly cadence."
+    },
+    "initiative-driver": {
+      "max_concurrent_runs": 1,
+      "max_runtime_minutes": 5,
+      "cooldown_minutes": 10,
+      "daily_run_budget": 20,
+      "circuit_breaker": {
+        "consecutive_failure_threshold": 3,
+        "backoff_minutes": 30
+      },
+      "_note": "PROPOSAL (ADR §6). Runs no LLM itself (pure-bash dispatcher); its cost is the dev-lead fan-out it triggers, so daily_run_budget here is a DISPATCHES/day bound (ADR §3) — the concrete key that keeps a single epic from flooding dev-lead. cooldown_minutes targets the close-event + schedule double-fire race (#443)."
+    }
+  },
+  "org_wide": {
+    "token_budget": {
+      "_note": "Org-wide Claude subscription token-budget breaker (ADR §7). INERT pending human sign-off; no workflow reads it (AC #3). Telemetry source of record is the OAuth usage endpoint (ADR §4.1), read privately (ADR §8.2) — this public file holds only the thresholds/policy. The session (5-hour) and weekly_all (7-day) windows are FIXED windows with an authoritative resets_at (ADR §4.1); within a window percent is monotonically non-decreasing and only the reset lowers it. There is deliberately NO percentage resume mark — under a fixed window a downward dip cannot occur, so such a mark would be unreachable (ADR §7). Only account-wide windows are pause-worthy; weekly_scoped (per-model) exhaustion is handled by the engine's model-fallback chain, never a fleet pause (ADR §2.5).",
+      "claude_priority": true,
+      "_claude_priority_note": "PROPOSAL (ADR §7). On budget recovery, Claude-backed agents (dev-lead, feature-ideation, and the Claude phase of compliance-audit) are prioritized so the recovering budget clears the backlog first; initiative-driver dispatch resumes after the direct Claude consumers.",
+      "limits": {
+        "session": {
+          "kind": "session",
+          "window_hours": 5,
+          "pause_worthy": true,
+          "pause_threshold_pct": 90,
+          "_note": "PROPOSAL (ADR §7). Pause new agentic dispatch when the 5-hour subscription budget reaches pause_threshold_pct (default 90%). Closes only at the window's resets_at (fixed window) — no intermediate half-open state, no resume percentage."
+        },
+        "weekly_all": {
+          "kind": "weekly_all",
+          "window_days": 7,
+          "pause_worthy": true,
+          "enabled": false,
+          "reserve_pct_per_day": 2,
+          "floor_pct": 86,
+          "ceiling_pct": 100,
+          "_note": "PROPOSAL (ADR §7; Phase 6 #994). Glide-path breaker: pause when percent >= clamp(ceiling_pct - (reserve_pct_per_day * days_until_reset), floor_pct, ceiling_pct). With reserve_pct_per_day=2, ceiling_pct=100, floor_pct=86 the schedule is 100% on reset day .. 86% just after a reset — the whole schedule is expressible from these keys, nothing is hardcoded. INERT: enabled=false keeps the breaker off (a maintainer arms it in config), independent of the AGENT_TOKEN_BUDGET_ENABLED integration flag. The threshold RISES as the reset approaches, so the breaker can close before resets_at because the threshold moved past a static (monotonic) percent — never because utilization fell; there is deliberately no percentage resume mark. days_until_reset derives from the authoritative resets_at (ADR §4.1) with partial days rounded UP, not a hardcoded weekday. floor_pct is the 'don't spend the whole week on day one' guard; ceiling_pct is the reset-day cap where the budget is minutes from refilling."
+        },
+        "weekly_scoped": {
+          "kind": "weekly_scoped",
+          "pause_worthy": false,
+          "_note": "Per-model exhaustion. Never pause-worthy (ADR §2.5): handled by the engine's model-fallback chain (swap models), not a fleet pause."
+        }
+      }
+    }
+  },
+  "exempt_actors": [
+    "dependabot[bot]",
+    "OrganizationAdmin",
+    "@petry-projects/org-leads",
+    "dependabot-automerge-petry"
+  ],
+  "exempt_labels": [
+    "security"
+  ],
+  "_exempt_note": "Actors/labels whose agent runs must never be blocked or deferred by the rate limits — the SAME set as standards/pr-limits.json so one policy governs both gates. dependabot[bot] is already bounded per-ecosystem by its own open-pull-requests-limit; OrganizationAdmin / @petry-projects/org-leads are human break-glass and maintainer traffic; dependabot-automerge-petry operates on existing PRs; security-labeled work is urgent and bypasses any throttle."
+}

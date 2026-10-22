@@ -1,0 +1,86 @@
+# Quality gates for the reusable pr-review-mention workflow.
+#
+# Triggered on any PR that touches:
+#   - .github/workflows/pr-review-mention*.yml
+#   - test/workflows/pr-review-mention/**
+#   - standards/workflows/pr-review-mention.yml
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for the test gh stub
+#   2. bats       — guard (self-trigger exclusion) + ack (no bot self-mention)
+#
+# Standard: pins issue #538 — the mention listener must never re-trigger itself.
+
+name: PR Review Mention Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/pr-review-mention*.yml'
+      - 'test/workflows/pr-review-mention/**'
+      - 'standards/workflows/pr-review-mention.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/pr-review-mention*.yml'
+      - 'test/workflows/pr-review-mention/**'
+      - 'standards/workflows/pr-review-mention.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-review-mention-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install bats, shellcheck, jq, and yq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq
+          # Install a pinned mikefarah/yq so the suite is reproducible and not
+          # dependent on whatever version ships in the runner image.
+          YQ_VERSION="v4.44.3"
+          # --proto '=https' --proto-redir '=https' enforces HTTPS on both the
+          # initial request and any redirects (GitHub releases redirect to
+          # objects.githubusercontent.com).
+          # --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors
+          # rides out the transient network/5xx blips from that redirect target
+          # that otherwise flake this suite (#739); the budget stays bounded so a
+          # genuinely-down mirror still fails the job fast.
+          curl -sSfL --proto '=https' --proto-redir '=https' --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /tmp/yq_linux_amd64
+          curl -sSfL --proto '=https' --proto-redir '=https' --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums" \
+            -o /tmp/yq_checksums
+          curl -sSfL --proto '=https' --proto-redir '=https' --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums_hashes_order" \
+            -o /tmp/yq_checksums_order
+          # The checksums file puts filename first; use checksums_hashes_order to
+          # find the SHA-256 column position dynamically.
+          SHA256_COL=$(( $(grep -n "^SHA-256$" /tmp/yq_checksums_order | cut -d: -f1) + 1 ))
+          EXPECTED_SHA="$(grep "^yq_linux_amd64 " /tmp/yq_checksums | awk -v col="${SHA256_COL}" '{print $col}')"
+          echo "${EXPECTED_SHA}  /tmp/yq_linux_amd64" | sha256sum -c -
+          sudo install -m 755 /tmp/yq_linux_amd64 /usr/local/bin/yq
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck -x test/workflows/pr-review-mention/stubs/gh
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure test/workflows/pr-review-mention/

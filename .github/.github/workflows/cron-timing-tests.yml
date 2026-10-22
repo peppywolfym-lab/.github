@@ -1,0 +1,63 @@
+# Quality gate for the off-peak scheduled-workflow timing check: the pure helper
+# lib, the CI check that consumes it, and their validating bats tests.
+#
+# Triggered on any PR that touches:
+#   - scripts/lib/cron-timing.sh
+#   - scripts/check-cron-timing.sh
+#   - test/scripts/cron-timing/**
+#   - .github/workflows/cron-timing-tests.yml
+#
+# Gate: bats validates that cron_minute_is_zero flags minute-0 crons, that
+# cron_offset_minute is deterministic, in 1..59, and de-collides the two
+# historical pairs, and that check-cron-timing.sh fails a minute-0 fixture,
+# points at the standard, and passes the repo's own (now offset) workflows.
+# ShellCheck of the scripts is covered by the existing scripts/**/*.sh job in
+# ci.yml. Standard: standards/ci-standards.md → "Scheduled Workflow Timing" (#1052).
+# Modeled on .github/workflows/pr-limits-tests.yml.
+
+name: Cron-timing Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/lib/cron-timing.sh'
+      - 'scripts/check-cron-timing.sh'
+      - 'test/scripts/cron-timing/**'
+      - '.github/workflows/cron-timing-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/lib/cron-timing.sh'
+      - 'scripts/check-cron-timing.sh'
+      - 'test/scripts/cron-timing/**'
+      - '.github/workflows/cron-timing-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cron-timing-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Validate cron timing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          # Read-only test job — never pushes; don't leave the token in git config.
+          persist-credentials: false
+
+      - name: Install bats
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure test/scripts/cron-timing/

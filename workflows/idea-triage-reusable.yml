@@ -1,0 +1,65 @@
+# Reusable Idea Triage — fleet dispatch workflow.
+# Single source of truth for the org: the dispatch logic lives here. Repo-level
+# idea-triage.yml files are thin caller stubs.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+#
+# Weekly (and on demand) it re-dispatches the CENTRAL idea-triage workflow in
+# petry-projects/.github-private with the CALLER repo as `target_repo`, so the
+# BMAD analyst scores THIS repo's Ideas backlog and refreshes THIS repo's "Idea
+# Promotion Queue" tracking issue. The triage tooling and vendored personas stay
+# vendored once, centrally — fleet repos only ship this thin trigger.
+#
+# IMPORTANT — the dispatch requires a PAT, not GITHUB_TOKEN:
+#   GitHub does not start new workflow runs from a workflow_dispatch fired with
+#   the default GITHUB_TOKEN (loop prevention). The dispatch MUST use a PAT with
+#   workflow scope (GH_PAT_WORKFLOWS).
+#
+# Requires:
+#   GH_PAT_WORKFLOWS — org secret, classic PAT (repo + workflow scope).
+name: Idea Triage — Fleet Dispatch (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      central_repo:
+        description: "owner/repo hosting the central idea-triage.yml workflow."
+        required: false
+        default: "petry-projects/.github-private"
+        type: string
+    secrets:
+      GH_PAT_DON_PETRY:
+        description: "Canonical org PAT — preferred over GH_PAT_WORKFLOWS when present"
+        required: false
+      GH_PAT_WORKFLOWS:
+        description: "Classic PAT with repo + workflow scope used to dispatch the central idea-triage (GITHUB_TOKEN cannot start a workflow_dispatch run)."
+        required: true
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Guard — PAT present
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::GH_PAT_DON_PETRY (or legacy GH_PAT_WORKFLOWS) is required — a workflow_dispatch fired with GITHUB_TOKEN will not start a run."
+            exit 1
+          fi
+
+      - name: Dispatch central idea-triage for this repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          CENTRAL_REPO: ${{ inputs.central_repo }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          echo "Triaging ${TARGET_REPO} → dispatching central idea-triage in ${CENTRAL_REPO}."
+          gh workflow run idea-triage.yml \
+            --repo "${CENTRAL_REPO}" \
+            -f target_repo="${TARGET_REPO}" \
+            -f dry_run=false
+          echo "Dispatched idea-triage.yml (target_repo=${TARGET_REPO}, dry_run=false)."

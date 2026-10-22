@@ -1,0 +1,98 @@
+# Quality gate for the agent rate-limit shared config (the single source of
+# truth), the source-side admission + circuit-breaker gate library, and their
+# validating bats tests.
+#
+# Triggered on any PR that touches:
+#   - standards/agent-rate-limits.json
+#   - scripts/lib/agent-rate-limit.sh
+#   - tests/test_agent_rate_limits_config.bats
+#   - tests/test_agent_rate_limit.bats
+#   - tests/test_agent_rate_limit_token_budget.bats
+#   - tests/test_agent_rate_limit_weekly_glide.bats
+#   - .github/workflows/agent-rate-limits-tests.yml
+#
+# Gate: bats validates that standards/agent-rate-limits.json parses as JSON, all
+# required keys exist, each in-scope agent type carries positive-integer limits
+# and a circuit breaker, the org-wide token-budget block records the 5-hour
+# session threshold (default 90%) and the Claude-priority flag, only account-wide
+# windows are pause-worthy, and — per the post-ADR clarification — no percentage
+# resume mark exists and the subscription windows are never called "rolling"; and
+# that the agent-rate-limit.sh guard returns allow/defer correctly (concurrency /
+# cooldown / daily-budget / exempt bypass, the consecutive-failure breaker's
+# open/half-open transitions, and malformed-input degradation that allows)
+# against a stubbed `gh`; and that the org-wide token-budget breaker (#641)
+# defers over the config threshold, blocks on a fresh 429, and fails safe to
+# allow on telemetry error; and that the weekly glide-path breaker (#994) defers
+# over a time-varying threshold derived from the payload's resets_at (with
+# partial days rounded up), ignores the per-model weekly_scoped limit, and fails
+# safe to allow on telemetry error — against a mocked telemetry adapter, no live
+# network.
+# ShellCheck of the lib is covered by the existing scripts/**/*.sh job in ci.yml.
+#
+# Context: ADR docs/initiatives/agent-rate-limits-adr.md (#637). #638 delivers the
+# data file (INERT, no workflow reads it yet pending human sign-off); #639 delivers
+# this gate library guard-only — wiring it into the live dispatch path is Phases
+# 4-5. Modeled on .github/workflows/pr-limits-tests.yml.
+
+name: Agent Rate-Limits Tests
+
+on:
+  pull_request:
+    paths:
+      - 'standards/agent-rate-limits.json'
+      - 'scripts/lib/agent-rate-limit.sh'
+      - 'scripts/agent-rate-limit-gate.sh'
+      - 'tests/test_agent_rate_limits_config.bats'
+      - 'tests/test_agent_rate_limit.bats'
+      - 'tests/test_agent_rate_limit_token_budget.bats'
+      - 'tests/test_agent_rate_limit_weekly_glide.bats'
+      - 'tests/test_agent_rate_limit_gate.bats'
+      - '.github/workflows/agent-rate-limits-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'standards/agent-rate-limits.json'
+      - 'scripts/lib/agent-rate-limit.sh'
+      - 'scripts/agent-rate-limit-gate.sh'
+      - 'tests/test_agent_rate_limits_config.bats'
+      - 'tests/test_agent_rate_limit.bats'
+      - 'tests/test_agent_rate_limit_token_budget.bats'
+      - 'tests/test_agent_rate_limit_weekly_glide.bats'
+      - 'tests/test_agent_rate_limit_gate.bats'
+      - '.github/workflows/agent-rate-limits-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-rate-limits-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Validate config and gate library
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          # Read-only test job — never pushes; don't leave the token in git config.
+          persist-credentials: false
+
+      - name: Install bats and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats jq
+
+      - name: Run bats suite
+        run: |
+          bats --print-output-on-failure \
+            tests/test_agent_rate_limits_config.bats \
+            tests/test_agent_rate_limit.bats \
+            tests/test_agent_rate_limit_token_budget.bats \
+            tests/test_agent_rate_limit_weekly_glide.bats \
+            tests/test_agent_rate_limit_gate.bats

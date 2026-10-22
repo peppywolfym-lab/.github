@@ -1,0 +1,363 @@
+# Reusable Persona Mention Router.
+# SOURCE OF TRUTH: petry-projects/.github/.github/workflows/persona-mention-reusable.yml
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/persona-standards.md (§4.1)
+#
+# Routes `@petry-projects/<role>` mentions to the addressed persona. ONE router
+# for every persona — personas do NOT each ship a mention workflow (§4.1); that
+# per-agent drift is exactly what the manifest exists to prevent.
+#
+# How a mention resolves, and why there is no index:
+#   `validate-personas.py` enforces address.handle's slug == id == the persona's
+#   directory name, so '@petry-projects/qa-lead' resolves to
+#   personas/qa-lead/persona.yml in .github-private by convention. The manifest
+#   IS the index-of-record (§1.1). A 404 means "not a persona" — which is also
+#   how a real, non-persona team like @petry-projects/org-leads falls through
+#   harmlessly.
+#
+# The manifest, not this file, decides:
+#   whether the mention surface is enabled, in what mode, behind which trust
+#   floor, and under which opt-out label. This router restates none of it.
+#
+# Human holds (stop_markers) — and why discussions are the exception:
+#   Each persona declares its human-hold brakes in
+#   personas/<id>/interaction.yml as stop_markers (needs-human-review,
+#   dev-lead:needs-human, <id>:hands-off, ...). This router honours ALL of them
+#   on a mention — derived from the contract, never restated — so a human hold
+#   stops the mentioned persona exactly as it stops the event-driven surfaces
+#   (#1133). Like the opt-out and the write-mode gate, this check needs the
+#   item's labels. A DISCUSSION has no labels API surface (LABELS_KNOWN=false),
+#   so stop markers cannot be evaluated there — exactly as the opt-out cannot.
+#   Discussion semantics are therefore UNCHANGED: a read-mode advisory mention
+#   still routes, and a write-mode mention is already refused because its gate
+#   cannot be verified. See standards/persona-standards.md §4 (rule 4).
+#
+# Requires:
+#   GH_PAT_WORKFLOWS — org secret, classic PAT (repo scope) for API calls and dispatch
+name: Persona Mention Router (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      tooling_ref:
+        description: |
+          Ref of petry-projects/.github to source scripts/lib/persona-mention.sh
+          from. Leave empty (the default) to source it from THIS reusable's own
+          commit (`github.job_workflow_sha`), which guarantees the routing logic
+          always matches the version of this workflow the caller pinned, with no
+          skew (the #465/#528 lesson: a fixed `v1` default predates the library
+          and fails every run with "No such file or directory"). Override only to
+          test a branch end-to-end.
+        required: false
+        default: ''
+        type: string
+      persona_ref:
+        description: |
+          Ref of petry-projects/.github-private to read persona manifests at.
+          Defaults to main — a persona's live contract is what is merged, not
+          what a branch proposes. Override only for end-to-end testing.
+        required: false
+        default: 'main'
+        type: string
+    secrets:
+      GH_PAT_DON_PETRY:
+        description: "Canonical org PAT — preferred over GH_PAT_WORKFLOWS when present"
+        required: false
+      GH_PAT_WORKFLOWS:
+        description: 'Classic PAT with repo scope, used for API calls and dispatching the persona'
+        required: true
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+concurrency:
+  # Serialise per comment, not per thread: two different personas addressed in
+  # one comment are dispatched by a single run, and cancelling an in-flight route
+  # would silently drop a mention.
+  group: persona-mention-${{ github.event.comment.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read        # actions/checkout of the tooling repo
+      issues: read          # read the item's labels for the opt-out / gate checks
+      pull-requests: read
+    # The CHEAP pre-filter, mirrored from pm_should_route (tests/persona_mention.bats).
+    # It runs BEFORE the job starts, so secrets are never exposed to a run that a
+    # bot, a marked comment, or an untrusted actor triggered.
+    #
+    # Two independent recursion axes, per §4.1 and the #860 postmortem (1,481
+    # acks in 4.5h). Comments posted via a PAT re-trigger workflows, unlike
+    # GITHUB_TOKEN, and with N mutually addressable personas the cycles are
+    # combinatorial, not self-loops:
+    #   1. bot actor — a comment authored by an agent identity never routes
+    #   2. marker    — a comment carrying '<!-- persona:' never routes
+    # Either alone closes the common loop; both together also close the case of
+    # an agent posting under a human's PAT.
+    #
+    # The trust check here is the conservative §4 default. A persona may TIGHTEN
+    # it in its own manifest (enforced below), never loosen it — so this gate is
+    # always at least as strict as the union of what the personas allow.
+    if: |
+      contains(github.event.comment.body, '@petry-projects/') &&
+      github.event.comment.user.login != 'donpetry-bot' &&
+      github.event.comment.user.login != 'github-actions[bot]' &&
+      !contains(github.event.comment.body, '<!-- persona:') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+
+    steps:
+      - name: Checkout persona-mention tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: petry-projects/.github
+          # Source the library from this reusable's own commit so the routing
+          # logic always matches the pinned workflow version (#465/#528).
+          ref: ${{ inputs.tooling_ref || github.job_workflow_sha }}
+          path: .persona-tooling
+          fetch-depth: 1
+          persist-credentials: false   # the tooling checkout needs no push creds
+
+      - name: Ensure PyYAML
+        # pm_manifest_query parses the manifest with python3 + yaml. PyYAML is NOT
+        # documented as preinstalled on the runner images, and this reusable runs
+        # on the CALLER's runner, so we cannot assume the caller installed it.
+        # Cheap no-op when already present.
+        #
+        # Hash- and binary-locked per the dependency-hardening gate
+        # (tests/dependency_hardening.bats). A bare `pip install pyyaml` is an
+        # unpinned, unverified supply-chain install running on every repo in the
+        # fleet — the gate caught exactly that here, and it was right to.
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || \
+            pip install --quiet --require-hashes --only-binary :all: \
+              -r .persona-tooling/scripts/persona-mention-requirements.txt
+
+      - name: Route the mention
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          PERSONA_REF: ${{ inputs.persona_ref }}
+          # Every event field arrives via env, never interpolated inline into the
+          # run: body. A comment body and a login are attacker-controlled, and an
+          # inline `${{ }}` in a run: block is a script-injection vector.
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          COMMENT_ASSOC: ${{ github.event.comment.author_association }}
+          # The comment's API url (.url), not .html_url: the dispatch target (the
+          # persona runner) fetches the comment body with `gh api "$COMMENT_URL"`
+          # to learn what the persona was asked, and gh api cannot fetch a
+          # github.com browser url. The API response still carries .html_url if a
+          # human-facing link is ever needed.
+          COMMENT_URL: ${{ github.event.comment.url }}
+          EVENT_NAME: ${{ github.event_name }}
+          ITEM_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || github.event.discussion.number }}
+          SOURCE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/persona-mention.sh
+          source .persona-tooling/scripts/lib/persona-mention.sh
+
+          if ! pm_should_route "$COMMENT_USER" "$COMMENT_ASSOC" "$COMMENT_BODY"; then
+            echo "Not routable (bot actor, agent marker, trust floor, or no handle) — nothing to do."
+            exit 0
+          fi
+
+          # Labels back BOTH the opt-out check and the write-mode gate, so an
+          # unreadable label set is never "no labels". `|| echo ""` here would let
+          # a transient API error bypass an opt-out and arm an ungated write —
+          # the fail-open pattern this framework already had four of (#755).
+          #
+          # Discussions genuinely have no labels API surface, so an empty set is
+          # the true answer there, not an error. That difference is load-bearing:
+          # write-mode on a discussion is refused below precisely because the gate
+          # cannot be verified.
+          LABELS=""
+          LABELS_KNOWN=false
+          if [ "$EVENT_NAME" = "discussion_comment" ]; then
+            echo "Discussion comment — no labels surface; opt-out/gate labels unavailable."
+          elif [ -z "${ITEM_NUMBER:-}" ]; then
+            echo "::error::no item number resolved for event '${EVENT_NAME}' — cannot check opt-out or gate labels"
+            exit 1
+          else
+            if ! LABELS="$(gh api "/repos/${SOURCE_REPO}/issues/${ITEM_NUMBER}/labels" --jq '.[].name')"; then
+              echo "::error::could not read labels for ${SOURCE_REPO}#${ITEM_NUMBER} — refusing to route (an unreadable label set must never be read as 'no opt-out, no gate')"
+              exit 1
+            fi
+            LABELS_KNOWN=true
+          fi
+
+          dispatched=0
+          while IFS= read -r slug; do
+            [ -n "$slug" ] || continue
+            echo "::group::@petry-projects/${slug}"
+
+            url="$(pm_manifest_url "$slug")"
+            # Fetched UNAUTHENTICATED, on purpose. petry-projects/.github-private is
+            # PUBLIC despite its name (private: false), so no token is needed — and
+            # adding one is actively harmful. Measured against this very URL:
+            #
+            #   unauthenticated -> 200      valid token   -> 200
+            #   expired token   -> 404      empty token   -> 404
+            #
+            # raw.githubusercontent answers a bad or MISSING token with 404, not 401.
+            # With an Authorization header, the moment GH_PAT_WORKFLOWS expires — or a
+            # repo adopts the stub before the secret exists, or a fork PR runs without
+            # secrets — every persona would 404 and be silently skipped as "not a
+            # persona". Unauthenticated cannot fail that way for a public repo, so the
+            # header only ADDS a silent-death path. (CodeRabbit asked for auth on the
+            # premise that the repo is private; it is not.)
+            #
+            # A 404 is a real ANSWER ("not a persona" — a plain team like
+            # @petry-projects/org-leads, or a typo). Anything else is a FAILURE to
+            # get an answer. `curl -f` collapses both into exit 22, which would
+            # make a raw.githubusercontent 5xx silently disable every persona
+            # fleet-wide with no error anywhere — indistinguishable from nobody
+            # being addressed. Separate them on the status code.
+            body_file="$(mktemp)"
+            # NO Authorization header, deliberately — see the note above the case.
+            http="$(curl -sSL --max-time 20 -o "$body_file" -w '%{http_code}' "$url" || echo 000)"
+            case "$http" in
+              200)
+                manifest="$(cat "$body_file")"
+                ;;
+              404)
+                rm -f "$body_file"
+                echo "No manifest at ${url} — not a persona (a plain team, or a typo). Skipping."
+                echo "::endgroup::"
+                continue
+                ;;
+              *)
+                rm -f "$body_file"
+                echo "::error::fetching ${url} returned HTTP ${http} — refusing to treat a fetch failure as 'not a persona'"
+                exit 1
+                ;;
+            esac
+            rm -f "$body_file"
+
+            # The slug we routed on must equal the id the manifest claims. These
+            # cannot diverge while validate-personas.py holds, so a mismatch means
+            # the invariant broke — refuse rather than guess which one is right.
+            claimed="$(pm_persona_id "$manifest")"
+            if [ "$claimed" != "$slug" ]; then
+              echo "::warning::manifest at ${url} claims id '${claimed}' but was addressed as '${slug}' — refusing to route"
+              echo "::endgroup::"
+              continue
+            fi
+
+            read -r enabled mode opt_out <<<"$(pm_mention_decision "$manifest")"
+            if [ "$enabled" != "true" ]; then
+              echo "Persona '${slug}' does not enable the mention surface (mode=${mode}). Skipping."
+              echo "::endgroup::"
+              continue
+            fi
+
+            if [ -n "$opt_out" ] && printf '%s\n' "$LABELS" | grep -qxF "$opt_out"; then
+              echo "Item carries '${opt_out}' — persona '${slug}' is opted out here. Skipping."
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Honour the persona's declared human-hold brakes (#1133). Each
+            # persona lists them in personas/<slug>/interaction.yml as
+            # stop_markers (needs-human-review, dev-lead:needs-human,
+            # <slug>:hands-off, ...). The event-driven surfaces already stop on
+            # ALL of them (the .github-private pull_request advisory gate;
+            # hold-gate.sh); the mention router honoured only the opt-out above,
+            # so a mention on a HELD item still dispatched — fail-open in exactly
+            # the direction that matters. The markers are DERIVED from the
+            # contract, never restated here (AC #2).
+            #
+            # Only evaluable where labels are readable. On a discussion
+            # (LABELS_KNOWN=false) the markers cannot be checked, exactly as the
+            # opt-out above cannot — see the discussion note in this file's
+            # header. Existing discussion semantics are preserved: a read-mode
+            # advisory mention still routes; a write-mode mention is already
+            # refused below because its gate cannot be verified there.
+            if [ "$LABELS_KNOWN" = "true" ]; then
+              interaction_url="$(pm_interaction_url "$slug")"
+              ibody_file="$(mktemp)"
+              # NO Authorization header — the SAME public-repo reasoning as the
+              # manifest fetch above; a token only adds a silent-death path.
+              ihttp="$(curl -sSL --max-time 20 -o "$ibody_file" -w '%{http_code}' "$interaction_url" || echo 000)"
+              # Fetch dispositions mirror the manifest fetch EXACTLY: 200 is the
+              # contract, 404 is a real answer ("no contract — refuse this slug"),
+              # anything else is a FAILURE to get an answer and fails the job. A
+              # transient 5xx must never be read as "no stop markers" (AC #3).
+              case "$(pm_fetch_disposition "$ihttp")" in
+                read)
+                  interaction="$(cat "$ibody_file")" || { rm -f "$ibody_file"; exit 1; }
+                  rm -f "$ibody_file"
+                  ;;
+                absent)
+                  rm -f "$ibody_file"
+                  echo "::warning::no interaction contract for '${slug}' at ${interaction_url} — a persona with a manifest must declare its stop markers; refusing to route on the opt-out alone"
+                  echo "::endgroup::"
+                  continue
+                  ;;
+                *)  # fail
+                  rm -f "$ibody_file"
+                  echo "::error::fetching ${interaction_url} returned HTTP ${ihttp} — refusing to treat a fetch failure as 'no stop markers'"
+                  exit 1
+                  ;;
+              esac
+
+              held_marker="$(printf '%s\n' "$LABELS" | pm_first_stop_marker "$interaction")"
+              if [ -n "$held_marker" ]; then
+                echo "Item carries stop marker '${held_marker}' — a human hold; persona '${slug}' honours it like the event-driven surfaces. Skipping."
+                echo "::endgroup::"
+                continue
+              fi
+            fi
+
+            # A write-mode mention must be ARMED. §4 rule 2 makes gate_label
+            # schema-required for write surfaces, but the schema only enforces
+            # that it is DECLARED — declaring a lock is not locking the door.
+            # Without this, '@petry-projects/dev-lead do X' is an ungated write
+            # the moment the first write persona onboards (#755).
+            if [ "$mode" = "write" ]; then
+              gate="$(pm_mention_gate_label "$manifest")"
+              if [ -z "$gate" ]; then
+                echo "::error::persona '${slug}' declares mode=write with no gate_label — refusing (schema violation: §4 rule 2)"
+                exit 1
+              fi
+              if [ "$LABELS_KNOWN" != "true" ]; then
+                echo "Persona '${slug}' is write-mode but labels are unavailable on this surface — cannot verify gate '${gate}'. Refusing."
+                echo "::endgroup::"
+                continue
+              fi
+              if ! printf '%s\n' "$LABELS" | grep -qxF "$gate"; then
+                echo "Persona '${slug}' is write-mode and NOT armed — '${gate}' absent. Skipping."
+                echo "::endgroup::"
+                continue
+              fi
+              echo "Write-mode armed by '${gate}'."
+            fi
+
+            # The persona's own floor, which may TIGHTEN the job-level default.
+            # An undeclared floor yields an empty set and pm_trust_ok denies —
+            # a persona that forgot to declare trust must not be more permissive
+            # than one that did.
+            floor="$(pm_mention_trust_floor "$manifest")"
+            # shellcheck disable=SC2086  # word-splitting is the point: floor is a set
+            if ! pm_trust_ok "$COMMENT_ASSOC" $floor; then
+              echo "@${COMMENT_USER} (${COMMENT_ASSOC}) is below persona '${slug}' floor [${floor}]. Skipping."
+              echo "::endgroup::"
+              continue
+            fi
+
+            echo "Routing to '${slug}' (mode=${mode})."
+            gh api \
+              --method POST \
+              --header "Accept: application/vnd.github+json" \
+              /repos/petry-projects/.github-private/dispatches \
+              --field event_type=persona-mention \
+              --field "client_payload[persona]=$slug" \
+              --field "client_payload[mode]=$mode" \
+              --field "client_payload[source_repo]=$SOURCE_REPO" \
+              --field "client_payload[item_number]=${ITEM_NUMBER:-}" \
+              --field "client_payload[comment_url]=$COMMENT_URL" \
+              --field "client_payload[requested_by]=$COMMENT_USER"
+            dispatched=$((dispatched + 1))
+            echo "::endgroup::"
+          done < <(pm_extract_slugs "$COMMENT_BODY")
+
+          echo "Dispatched ${dispatched} persona(s)."

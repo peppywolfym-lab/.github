@@ -1,0 +1,70 @@
+name: Daily Org Status
+# readme-report: Daily "Org Status" digest posted as an issue for maintainers.
+
+on:
+  schedule:
+    - cron: '55 11 * * *'   # 11:55 UTC — 6:55 AM CDT (UTC-5), shifts to 5:55 AM in winter CST
+  workflow_dispatch:         # allow manual trigger from Actions tab
+
+permissions: {}              # no default permissions; each job grants only what it needs
+
+jobs:
+  report:
+    name: Generate & post org status
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      issues: write          # create issue in this repo
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Generate org status report
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          chmod +x scripts/org_status.sh scripts/org_report.sh
+          bash scripts/org_status.sh > /tmp/report.md
+          [ -s /tmp/report.md ] || { echo "Report is empty — aborting"; exit 1; }
+
+      - name: Truncate report if near GitHub issue body limit
+        run: |
+          MAX_BYTES=64000
+          REPORT_SIZE=$(wc -c < /tmp/report.md)
+          echo "Report size: ${REPORT_SIZE} bytes (limit: ${MAX_BYTES})"
+          if [ "$REPORT_SIZE" -gt "$MAX_BYTES" ]; then
+            echo "Truncating to line boundary near ${MAX_BYTES} bytes..."
+            FOOTER=$'\n_Report truncated — exceeded GitHub issue body limit._\n'
+            FOOTER_LEN=$(printf '%s' "$FOOTER" | wc -c)
+            SAFE_BUDGET=$(( MAX_BYTES - FOOTER_LEN ))
+            TRUNCATE_AT=$(python3 -c "d=open('/tmp/report.md','rb').read(${SAFE_BUDGET});nl=d.rfind(b'\n');print(nl+1 if nl>=0 else len(d))")
+            head -c "$TRUNCATE_AT" /tmp/report.md > /tmp/report_truncated.md
+            printf '%s' "$FOOTER" >> /tmp/report_truncated.md
+            mv /tmp/report_truncated.md /tmp/report.md
+            echo "Final size: $(wc -c < /tmp/report.md) bytes"
+          fi
+
+      - name: Create daily-report issue
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          # This digest embeds the date in its title, so a fresh issue is created
+          # every day — 32 had accumulated open. Close prior open Org Status
+          # digests before opening today's so only the current snapshot stays open.
+          gh issue list --repo "$GITHUB_REPOSITORY" --label daily-report --state open \
+            --search "Org Status — in:title" --limit 200 \
+            --json number,title \
+            -q '.[] | select(.title | startswith("Org Status — ")) | .number' \
+          | while read -r prev; do
+              [ -n "$prev" ] || continue
+              gh issue close "$prev" --repo "$GITHUB_REPOSITORY" \
+                --comment "Superseded by the newer daily Org Status snapshot." \
+                || echo "::warning::Failed to close issue #$prev — it may remain open until the next daily run."
+            done
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Org Status — $DATE" \
+            --body-file /tmp/report.md \
+            --label daily-report

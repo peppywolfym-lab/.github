@@ -1,0 +1,76 @@
+# Quality gates for the canary-rollout release engine and its pure gate core.
+#
+# The engine + its bats suite were relocated into this repo by #613/#624 but no
+# CI runner came with them, so tests/canary_rollout.bats went unenforced. This
+# workflow closes that gap.
+#
+# Triggered on any PR (or push to main) that touches:
+#   - scripts/canary-rollout.sh          (orchestrator)
+#   - scripts/lib/canary-rollout.sh      (pure gate core)
+#   - tests/canary_rollout.bats          (the suite)
+#   - .github/workflows/canary-rollout-tests.yml (this file)
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for the orchestrator + pure core
+#   2. bats       — the full canary_rollout unit/behaviour suite
+#
+# Standard: the pure core (scripts/lib/canary-rollout.sh) is side-effect-free so
+# the suite can pin gate behaviour without network — the house pattern this
+# engine itself exemplifies.
+
+name: Canary-rollout Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/canary-rollout.sh'
+      - 'scripts/lib/canary-rollout.sh'
+      - 'tests/canary_rollout.bats'
+      - '.github/workflows/canary-rollout.yml'
+      - '.github/workflows/canary-rollout-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/canary-rollout.sh'
+      - 'scripts/lib/canary-rollout.sh'
+      - 'tests/canary_rollout.bats'
+      - '.github/workflows/canary-rollout.yml'
+      - '.github/workflows/canary-rollout-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary-rollout-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install bats, shellcheck, and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning -x scripts/canary-rollout.sh scripts/lib/canary-rollout.sh
+
+      - name: Run bats suite
+        # The suite stubs gh/git via PATH; a dummy token satisfies the
+        # orchestrator's token precondition without any real API access.
+        env:
+          GH_TOKEN: dummy-token-for-stubbed-tests
+        run: bats --print-output-on-failure tests/canary_rollout.bats

@@ -1,0 +1,51 @@
+name: PR-limits Report
+
+# No-LLM PR-limits success-metric report (#510, epic #505 Story 5).
+#
+# Pure `gh` + `jq` (NO LLM / agent): enumerates open, non-draft, automation
+# PRs org-wide and compares the count against the signed-off cap in
+# standards/pr-limits.json, using the SAME counting semantics as the admission
+# gate (scripts/lib/pr-limit-gate.sh) so the report and the gate agree. Writes a
+# Markdown summary to the job summary. Runs at most once daily plus manual
+# dispatch. Modeled on daily-org-status.yml.
+
+on:
+  schedule:
+    - cron: '44 12 * * *'   # once daily, 12:44 UTC — 07:44 CDT (UTC-5)
+  workflow_dispatch:         # allow manual trigger from the Actions tab
+
+permissions: {}              # no default permissions; the job grants only what it needs
+
+concurrency:
+  group: pr-limits-report-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Measure open automation PRs vs. cap
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read           # checkout + read standards/pr-limits.json
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          # Read-only job — never pushes; don't leave the token in git config.
+          persist-credentials: false
+
+      - name: Ensure jq is available
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends jq
+          fi
+
+      - name: Generate PR-limits report
+        env:
+          # `gh search prs` needs a token; github.token has the read scope it needs.
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/pr-limits-report.sh

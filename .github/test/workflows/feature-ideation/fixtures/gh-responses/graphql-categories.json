@@ -1,0 +1,13 @@
+{
+  "data": {
+    "repository": {
+      "discussionCategories": {
+        "nodes": [
+          {"id": "DC_general", "name": "General"},
+          {"id": "DC_ideas", "name": "Ideas"},
+          {"id": "DC_qna", "name": "Q&A"}
+        ]
+      }
+    }
+  }
+}

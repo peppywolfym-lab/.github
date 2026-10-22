@@ -1,0 +1,75 @@
+# Reusable Idea Enhancer — fleet dispatch workflow.
+# Single source of truth for the org: the dispatch logic lives here. Repo-level
+# idea-enhancer.yml files are thin caller stubs.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+#
+# When a human opens a new Ideas Discussion (or on a weekly safety-net sweep), it
+# re-dispatches the CENTRAL idea-enhancer in petry-projects/.github-private with
+# the CALLER repo as `target_repo`. The analyst enriches THIS repo's open,
+# human-authored, not-yet-enhanced Ideas Discussions (one comment each: sharpened
+# problem/goal, repo + market context, impact/effort, suggested acceptance
+# criteria). Enhancement is idempotent (a hidden marker prevents re-enhancement),
+# so the per-discussion fan-in to a full backlog sweep is safe.
+#
+# Why dispatch instead of running inline: claude-code-action aborts on a
+# `discussion` event context, so the enhancement must run under the central
+# workflow_dispatch, the same bridge the initiative-planner uses.
+#
+# IMPORTANT — the dispatch requires a PAT, not GITHUB_TOKEN (loop prevention).
+#
+# Requires:
+#   GH_PAT_WORKFLOWS — org secret, classic PAT (repo + workflow scope).
+name: Idea Enhancer — Fleet Dispatch (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      central_repo:
+        description: "owner/repo hosting the central idea-enhancer.yml workflow."
+        required: false
+        default: "petry-projects/.github-private"
+        type: string
+    secrets:
+      GH_PAT_DON_PETRY:
+        description: "Canonical org PAT — preferred over GH_PAT_WORKFLOWS when present"
+        required: false
+      GH_PAT_WORKFLOWS:
+        description: "Classic PAT with repo + workflow scope used to dispatch the central idea-enhancer (GITHUB_TOKEN cannot start a workflow_dispatch run)."
+        required: true
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # On the `discussion` trigger, only fire for new ideas in the Ideas category
+    # and skip the bot's own creations (bot-authored ideas are already AI-written).
+    # Schedule/dispatch runs are unaffected by this guard.
+    if: >-
+      github.event_name != 'discussion' ||
+      (github.event.discussion.category.slug == 'ideas' &&
+       github.event.discussion.user.type != 'Bot')
+    permissions: {}
+    steps:
+      - name: Guard — PAT present
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::GH_PAT_DON_PETRY (or legacy GH_PAT_WORKFLOWS) is required — a workflow_dispatch fired with GITHUB_TOKEN will not start a run."
+            exit 1
+          fi
+
+      - name: Dispatch central idea-enhancer for this repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          CENTRAL_REPO: ${{ inputs.central_repo }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          echo "Enhancing ${TARGET_REPO}'s ideas → dispatching central idea-enhancer in ${CENTRAL_REPO}."
+          gh workflow run idea-enhancer.yml \
+            --repo "${CENTRAL_REPO}" \
+            -f target_repo="${TARGET_REPO}" \
+            -f dry_run=false
+          echo "Dispatched idea-enhancer.yml (target_repo=${TARGET_REPO}, dry_run=false)."

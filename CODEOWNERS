@@ -1,0 +1,11 @@
+# CODEOWNERS
+# Each line is a pattern followed by one or more owners.
+# Owners are matched in order, last matching pattern wins.
+#
+# Standard: use the @petry-projects/org-leads team for all code owner
+# assignments instead of listing individuals or bot accounts directly.
+# This keeps CODEOWNERS files stable and centralizes membership management.
+# See: standards/codeowners-standard.md
+
+# Default catch-all — org-leads own everything
+* @petry-projects/org-leads

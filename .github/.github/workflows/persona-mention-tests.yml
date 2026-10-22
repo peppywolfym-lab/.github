@@ -1,0 +1,74 @@
+# Quality gates for the persona @-mention routing core.
+#
+# Standard: standards/persona-standards.md §4.1 (addressing).
+#
+# A bats suite with no CI runner is unenforced — the #613/#624 gap that
+# canary-rollout-tests.yml exists to close. This is that runner for
+# tests/persona_mention.bats, added with the suite rather than after it.
+#
+# Triggered on any PR (or push to main) that touches:
+#   - scripts/lib/persona-mention.sh                   (the pure routing core)
+#   - tests/persona_mention.bats                       (the suite)
+#   - .github/workflows/persona-mention-reusable.yml   (the router that uses it)
+#   - .github/workflows/persona-mention-tests.yml      (this file)
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for the pure core
+#   2. bats       — the full routing suite, recursion guards included
+#
+# The core is side-effect-free and network-free by construction (fetching is the
+# workflow's job, not the library's), so the suite pins routing behaviour —
+# especially the two-axis recursion guard — with no API access at all. That
+# matters here: .github-private#860 burned 1,481 acks in 4.5h from a single
+# self-loop, and a regression in pm_should_route is the expensive kind.
+
+name: Persona-mention Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/lib/persona-mention.sh'
+      - 'tests/persona_mention.bats'
+      - '.github/workflows/persona-mention-reusable.yml'
+      - '.github/workflows/persona-mention-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/lib/persona-mention.sh'
+      - 'tests/persona_mention.bats'
+      - '.github/workflows/persona-mention-reusable.yml'
+      - '.github/workflows/persona-mention-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: persona-mention-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install bats, shellcheck, jq, and PyYAML
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck jq python3-yaml
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning -x scripts/lib/persona-mention.sh
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure tests/persona_mention.bats
