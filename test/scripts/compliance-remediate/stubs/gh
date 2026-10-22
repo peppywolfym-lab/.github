@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Fake `gh` binary used by compliance-remediate bats tests.
+#
+# Mirrors the pattern from test/workflows/feature-ideation/stubs/gh: behaviour
+# is fully env-driven so individual tests can script success / failure without
+# per-fixture stub variants.
+#
+# Recognized vars:
+#   GH_STUB_STDOUT  — literal text emitted on stdout (default empty)
+#   GH_STUB_STDERR  — literal text emitted on stderr (default empty)
+#   GH_STUB_EXIT    — exit code (default 0)
+#   GH_STUB_LOG     — append-only log of argv invocations, one shell-quoted
+#                     line per call (via `printf '%q '`) so tests can
+#                     re-parse losslessly.
+#   GH_STUB_STDIN_LOG — if set, the stub's stdin is appended to this file
+#                       so tests can assert on the JSON payload sent to
+#                       `gh api --input -`.
+
+set -euo pipefail
+
+if [ -n "${GH_STUB_LOG:-}" ]; then
+  # shellcheck disable=SC2059
+  printf '%q ' "$@" >>"$GH_STUB_LOG"
+  printf '\n' >>"$GH_STUB_LOG"
+fi
+
+if [ -n "${GH_STUB_STDIN_LOG:-}" ]; then
+  # Drain stdin so the calling shell isn't blocked. Empty stdin is fine.
+  # Don't suppress failures — a broken log path means broken test
+  # instrumentation, which would silently weaken payload assertions.
+  cat >>"$GH_STUB_STDIN_LOG" || {
+    echo "gh stub: failed to append stdin to GH_STUB_STDIN_LOG=$GH_STUB_STDIN_LOG" >&2
+    exit 1
+  }
+fi
+
+if [ -n "${GH_STUB_STDOUT:-}" ]; then
+  printf '%s' "$GH_STUB_STDOUT"
+fi
+
+if [ -n "${GH_STUB_STDERR:-}" ]; then
+  printf '%s' "$GH_STUB_STDERR" >&2
+fi
+
+exit "${GH_STUB_EXIT:-0}"

@@ -1,0 +1,110 @@
+{
+  "_schema_version": 1,
+  "_note": "STRUCTURAL rule set for AGENTS.md validation — the documented, machine-readable single source of truth the AGENTS.md structural linter reads (#643, Phase 1 of epic #642). Reference doc: docs/initiatives/agents-md-validation.md. Derived from the STABLE structural subset of the AAIF/agents.md spec (see spec_snapshot), NOT its semantic content (see out_of_scope). The file is INERT on merge: no script, workflow, or audit consumes it in this Phase-1 story — the Phase 2 standalone shell linter reads it, Phase 3 wires it into the Standards Sync compliance audit (informational), and Phase 4 supplies the informational->blocking promotion. Keeping the rules in this data file (not hardcoded in the linter) is the key design constraint: the upstream spec is young and moving, so the rule set must be updatable without code changes. Every rule is tagged 'required' or 'recommended'; a 'recommended' rule is reported but NEVER fails the check.",
+  "scope": "structural",
+  "_scope_note": "Only STABLE STRUCTURAL elements of AGENTS.md are validated — the shape of the document (headings, references, imports), never the meaning, correctness, or wording of the guidance it contains. This deliberately narrow scope matches discussion #534's adversarial rebuttal that semantic validation is contested and out of bounds for a deterministic linter.",
+  "out_of_scope": [
+    "Semantic content of any section (whether the guidance is correct, current, or complete)",
+    "Wording, tone, prose style, or readability of the content",
+    "Whether a stated standard matches actual repository behavior (a content/semantic claim)",
+    "Presence or accuracy of specific policy values (numbers, SHAs, thresholds) inside the prose",
+    "Ordering or naming of sections beyond the recommended section-presence checks below"
+  ],
+  "spec_snapshot": {
+    "spec_name": "AAIF AGENTS.md convention (agents.md)",
+    "source": "https://agents.md/",
+    "date": "2026-09-01",
+    "stable_subset": "The rules below are derived only from the parts of the agents.md convention that are structurally stable across spec revisions: a single top-level document title, a conventional Markdown heading hierarchy, resolvable in-document and relative cross-references, and — for this org — a link from each downstream repo's AGENTS.md back to the canonical petry-projects/.github AGENTS.md. Section names and their required/optional split are explicitly treated as unstable (see the 'recommended' rules) because the upstream spec is young and moving.",
+    "capture_note": "Captured as the Phase-1 prerequisite noted on epic #642 (the upstream spec is external and evolving and is not tracked as a GitHub issue). Re-capture source + date when bumping _schema_version to reflect a new stable subset."
+  },
+  "rules": [
+    {
+      "id": "single-h1-title",
+      "element": "heading-structure",
+      "level": "required",
+      "applies_to": "all",
+      "description": "The document has exactly one level-1 (H1, '# ') heading, and it is the first heading in the file.",
+      "check": "Count ATX '# ' headings (ignoring '#' inside fenced code blocks); exactly one, appearing before any deeper heading.",
+      "rationale": "A single H1 title is the most stable structural invariant of the agents.md convention and of Markdown documents generally; zero or multiple H1s is unambiguously malformed regardless of content."
+    },
+    {
+      "id": "heading-hierarchy-valid",
+      "element": "heading-structure",
+      "level": "required",
+      "applies_to": "all",
+      "description": "Heading levels never jump by more than one when descending (e.g. an H2 is not followed directly by an H4).",
+      "check": "Walk headings top-to-bottom (excluding fenced code blocks); each heading's level is at most one greater than the deepest open ancestor level.",
+      "rationale": "A skipped heading level is a structural defect that breaks the table-of-contents/outline every AGENTS.md consumer builds; it is detectable deterministically without reading any content."
+    },
+    {
+      "id": "cross-reference-integrity",
+      "element": "cross-reference",
+      "level": "required",
+      "applies_to": "all",
+      "description": "In-document anchor links and repo-relative file links resolve to an existing target (a heading anchor in the same file, or a path that exists in the repo).",
+      "check": "For each Markdown link: '#anchor' must match a slugified heading in the file; a relative path (not http/https/mailto) must exist in the repo. Absolute URLs are not fetched (that would be non-deterministic and add cost).",
+      "rationale": "A dangling cross-reference is a structural break, not a content judgement — the target either exists or it does not — so it is safe to make required while staying deterministic and zero-cost."
+    },
+    {
+      "id": "org-repo-import-consistency",
+      "element": "import",
+      "level": "required",
+      "applies_to": "downstream",
+      "description": "A downstream (non-canonical) repo's AGENTS.md links back to the canonical petry-projects/.github AGENTS.md, so the org-wide standards are imported rather than forked.",
+      "check": "In any repo other than petry-projects/.github, the AGENTS.md must contain a link whose target references petry-projects/.github AGENTS.md (the canonical file). The canonical file itself is exempt (applies_to=downstream).",
+      "rationale": "The canonical AGENTS.md declares it 'is intended to be imported by each repository's own AGENTS.md or CLAUDE.md'; the presence of that back-link is a structural, checkable fact — the basis for cross-repo import-consistency in epic #642 — independent of the imported content."
+    },
+    {
+      "id": "fenced-code-block-closure",
+      "element": "code-block",
+      "level": "required",
+      "applies_to": "all",
+      "description": "Every fenced code block opened with ``` or ~~~ is closed by a matching fence.",
+      "check": "Fence tokens balance: the count of opening fences equals the count of closing fences of the same type.",
+      "rationale": "An unclosed fence silently swallows the rest of the document for every Markdown parser — a purely structural defect with no semantic component."
+    },
+    {
+      "id": "standards-reference-section-present",
+      "element": "section-presence",
+      "level": "recommended",
+      "applies_to": "all",
+      "description": "A section that points to or summarises the org development standards is present.",
+      "check": "A heading whose text matches a standards/development-standards pattern exists.",
+      "rationale": "RECOMMENDED, not required: the exact required-vs-recommended split for section presence is an open question (epic #642 open questions). Reported for visibility but never fails the check until confirmed and promoted."
+    },
+    {
+      "id": "security-section-present",
+      "element": "section-presence",
+      "level": "recommended",
+      "applies_to": "all",
+      "description": "A security / secrets-handling section is present.",
+      "check": "A heading whose text matches a security/secrets pattern exists.",
+      "rationale": "RECOMMENDED, not required: section presence is contested (epic #642). Surfaced informationally so maintainers can decide whether to promote it after clean audit cycles."
+    },
+    {
+      "id": "testing-section-present",
+      "element": "section-presence",
+      "level": "recommended",
+      "applies_to": "all",
+      "description": "A testing / test-driven-development section is present.",
+      "check": "A heading whose text matches a test/TDD pattern exists.",
+      "rationale": "RECOMMENDED, not required: section presence is contested (epic #642). Surfaced informationally until the required set is confirmed and promoted."
+    }
+  ],
+  "promotion": {
+    "default_severity": "informational",
+    "target_severity": "blocking",
+    "clean_cycles_required": 2,
+    "maintainer_sign_off_required": true,
+    "criteria": "The structural check ships INFORMATIONAL (non-blocking): findings are reported in the Standards Sync audit summary and annotated on canonical-AGENTS.md PRs, but never fail a run. It is promoted to BLOCKING only after (1) two consecutive Standards Sync audit cycles with zero confirmed false positives AND (2) explicit maintainer sign-off. Promotion is a deliberate, human-gated flip of default_severity to 'blocking' — mirroring the human sign-off gate used for the pr-limits and agent-rate-limits configs — not an automatic transition.",
+    "note": "A recommended-level rule is never blocking even after the overall check is promoted; only required-level rules can fail a blocking run. Promotion changes the check's severity, not any rule's level.",
+    "cycle_log": "docs/initiatives/agents-md-validation-cycle-log.md",
+    "cycle_log_note": "The append-only, committed per-cycle log is the durable, tamper-evident, independently-auditable source of truth for the 'two consecutive clean cycles' precondition (issue #647, AC #5) — NOT the editable audit summary issue. Each cycle records the structural finding count and every confirmed false positive, each attributed to a named maintainer. Read/validate it with scripts/agents-md-cycle-log.sh (it reports the clean-cycle precondition but NEVER promotes).",
+    "toggle": {
+      "enabled": false,
+      "note": "The discrete, reviewable blocking-mode flip. This story (#647) delivers the mechanism and leaves it DISABLED (enabled=false); the actual flip is a separate, human-gated decision recorded against the criteria above (issue #647, AC #3 and #4). Two independent points must be armed to enforce, and neither is armed here.",
+      "linter_flag": "scripts/agents-md-lint.sh --mode failing (Phase 2 toggle point): exits non-zero on a required-level finding instead of report-only. The compliance audit invokes the linter informational-only today.",
+      "required_status_check": "The local canonical-AGENTS.md CI self-check becomes a REQUIRED status check on main via branch protection (documented in standards/github-settings.md); this story applies no branch-protection change."
+    }
+  }
+}

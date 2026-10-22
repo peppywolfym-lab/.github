@@ -1,0 +1,27 @@
+# Initiative <TAB> Theme  — canonical roll-up used by classify-initiative.sh.
+# Comments (#) and blank lines ignored. See standards/initiatives-project.md.
+dev-lead agent	Agentic Framework
+pr-review agent	Agentic Framework
+GH-AW	Agentic Framework
+Copilot Instructions	Agentic Framework
+Security	Agentic Framework
+Model Selection	Agentic Framework
+Fleet Monitor	Fleet Operations
+Daily Reports	Fleet Operations
+Org Standards	Fleet Operations
+Release Strategy	Fleet Operations
+Compliance program	Compliance
+Compliance Blitz	Compliance
+Self-healing	Compliance
+Auto-rebase	Compliance
+Initiatives Project	Tooling
+Tooling	Tooling
+Ad hoc	Ad hoc
+Business Analyst	Agentic Framework
+Cost Observability	Fleet Operations
+TalkTerm	TalkTerm
+Broodly	Broodly
+Markets	Markets
+Google App Scripts	Google App Scripts
+ContentTwin	ContentTwin
+BMAD	Agentic Framework

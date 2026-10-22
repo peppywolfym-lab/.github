@@ -1,0 +1,210 @@
+# Reusable PR Review — Mention Trigger workflow.
+# Single source of truth for the org: all review-dispatch logic lives here.
+# Repo-level pr-review-mention.yml files are thin caller stubs.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+#
+# Fires when @donpetry-bot is mentioned in a PR comment / review comment,
+# or when donpetry-bot is assigned as a reviewer on a PR. Dispatches a
+# repository_dispatch event to petry-projects/.github-private to trigger the
+# pr-review agent cascade.
+#
+# Requires:
+#   GH_PAT_WORKFLOWS     — org secret, classic PAT (repo scope) for API calls and dispatch
+#   DON_PETRY_BOT_GH_PAT — org secret, classic PAT owned by donpetry-bot (repo scope) for posting comments
+name: PR Review — Mention Trigger (Reusable)
+
+on:
+  workflow_call:
+    secrets:
+      GH_PAT_DON_PETRY:
+        description: "Canonical org PAT — preferred over GH_PAT_WORKFLOWS when present"
+        required: false
+      GH_PAT_WORKFLOWS:
+        description: "Classic PAT with repo scope used for API calls and dispatching the review agent"
+        required: true
+      DON_PETRY_BOT_GH_PAT:
+        description: "Classic PAT owned by donpetry-bot, used to post acknowledgement comments as the bot"
+        required: true
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  handle-mention:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    # Fire when:
+    #   (a) donpetry-bot is added as a reviewer on a same-repo PR (fork PRs
+    #       don't receive org secrets so we exclude them), OR
+    #   (b) @donpetry-bot is mentioned in a PR comment / review comment.
+    #
+    # Guard each branch against missing fields: requested_reviewer is null for
+    # team review requests; comment fields don't exist on pull_request events.
+    # For comment events we also gate at the job level on author_association so
+    # that the job (and its secrets) never start for external/untrusted actors.
+    #
+    # Recursion guard (#538): when triggered by a human the ack comment
+    # addresses them as '@<actor>' — but ack comments posted by the bot itself
+    # use a plain login (no leading '@'), so they carry no mention webhook. The
+    # comment is also posted via a PAT (so it DOES re-trigger workflows, unlike
+    # GITHUB_TOKEN), which without this guard self-loops until GitHub's
+    # 2500-comment cap (.github-private#860: 1,481 identical acks over ~4.5h).
+    # A comment the agent posts about its own work must never re-trigger the
+    # agent, so we exclude on TWO independent axes, belt-and-suspenders:
+    #   1. the bot actor — any comment authored by donpetry-bot is skipped, and
+    #   2. the marker — any comment carrying an '<!-- pr-review-agent' marker is
+    #      skipped (broadened from the old 'pr-review-agent mention-ack' string
+    #      so EVERY agent-posted comment, not just the ack, is caught).
+    # The earlier design matched the marker alone to keep donpetry-bot's own
+    # @-mention review requests working, but #860 showed the self-trigger risk
+    # outweighs that convenience; the bot can still request a review via the
+    # review_requested (assign-reviewer) path above.
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.requested_reviewer != null &&
+       github.event.requested_reviewer.login == 'donpetry-bot' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name != 'pull_request' &&
+       contains(github.event.comment.body, '@donpetry-bot') &&
+       github.event.comment.user.login != 'donpetry-bot' &&
+       !contains(github.event.comment.body, '<!-- pr-review-agent') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+       (github.event_name == 'pull_request_review_comment' ||
+        github.event.issue.pull_request != null))
+
+    steps:
+      - name: Check commenter trust level
+        id: trust
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          # Only OWNER, MEMBER, and COLLABORATOR can trigger reviews.
+          # This prevents external contributors or bots from burning review quota.
+          #
+          # For review_requested events author_association is absent from the
+          # sender payload, so query the collaborator permission API instead.
+          # The endpoint returns a top-level .permission string:
+          #   "admin" | "write" | "read" | "none"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            ACTOR="${{ github.event.sender.login }}"
+            PERM=$(gh api /repos/${{ github.repository }}/collaborators/${{ github.event.sender.login }}/permission \
+              --jq '.permission' 2>/dev/null || echo "none")
+            case "$PERM" in
+              admin|write)
+                echo "trusted=true" >> "$GITHUB_OUTPUT"
+                echo "Actor @$ACTOR has permission $PERM — trusted"
+                ;;
+              *)
+                echo "trusted=false" >> "$GITHUB_OUTPUT"
+                echo "Actor @$ACTOR has permission $PERM — not trusted, skipping"
+                ;;
+            esac
+          else
+            ACTOR="${{ github.event.comment.user.login }}"
+            ASSOC="${{ github.event.comment.author_association }}"
+            case "$ASSOC" in
+              OWNER|MEMBER|COLLABORATOR)
+                echo "trusted=true" >> "$GITHUB_OUTPUT"
+                echo "Actor @$ACTOR has association $ASSOC — trusted"
+                ;;
+              *)
+                echo "trusted=false" >> "$GITHUB_OUTPUT"
+                echo "Actor @$ACTOR has association $ASSOC — not trusted, skipping"
+                ;;
+            esac
+          fi
+
+      - name: Resolve PR URL
+        id: pr
+        if: steps.trust.outputs.trusted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          # Resolve by event name: review_requested and review-comment payloads
+          # expose the PR directly; only issue_comment needs a gh api round-trip.
+          # Guard the empty case so we never call `gh api ""` (#500).
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          ISSUE_PR_API_URL: ${{ github.event.issue.pull_request.url }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request | pull_request_review_comment)
+              PR_URL="$PR_HTML_URL"
+              ;;
+            issue_comment)
+              if [ -z "$ISSUE_PR_API_URL" ]; then
+                echo "resolve-pr-url: issue_comment event has no pull_request url (not a PR comment)" >&2
+                exit 1
+              fi
+              PR_URL="$(gh api "$ISSUE_PR_API_URL" --jq '.html_url')" || {
+                echo "resolve-pr-url: failed to retrieve PR URL from GitHub API using '$ISSUE_PR_API_URL'" >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "resolve-pr-url: unsupported event '$EVENT_NAME'" >&2
+              exit 1
+              ;;
+          esac
+          if [ -z "$PR_URL" ] || [ "$PR_URL" = "null" ]; then
+            echo "resolve-pr-url: could not resolve a PR url for event '$EVENT_NAME'" >&2
+            exit 1
+          fi
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "PR URL: $PR_URL"
+
+      - name: Post acknowledgement comment
+        if: steps.trust.outputs.trusted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DON_PETRY_BOT_GH_PAT }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          # Pass event fields via env, never interpolated inline into the shell
+          # body — a login is attacker-controlled and inline `${{ }}` in a run:
+          # block is a script-injection vector.
+          EVENT_NAME: ${{ github.event_name }}
+          SENDER_LOGIN: ${{ github.event.sender.login }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          BOT_LOGIN: donpetry-bot
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            ACTOR="$SENDER_LOGIN"
+            ACTION="assigned me as reviewer — starting a fresh review now. Results will appear in a few minutes."
+          else
+            ACTOR="$COMMENT_USER"
+            ACTION="I'm on it — starting a fresh review now. Results will appear in a few minutes."
+          fi
+          # Never emit a literal '@donpetry-bot' (#538): an @-mention of the bot
+          # is itself an issue_comment the mention listener reads as a review
+          # request, self-looping the cascade. When the actor IS the bot, address
+          # it by plain login (no leading '@' → fires no mention webhook); a human
+          # requester still gets a real @-mention ping.
+          if [ "$ACTOR" = "$BOT_LOGIN" ]; then
+            ADDRESSEE="$ACTOR"
+          else
+            ADDRESSEE="@${ACTOR}"
+          fi
+          MSG="${ADDRESSEE} ${ACTION}"
+          # Best-effort (issue #594): the ack comment ran unguarded under `bash -e`,
+          # so a single PR at GitHub's 2500-comment cap ("Commenting is disabled on
+          # issues with more than 2500 comments"), a secondary rate limit, or a
+          # transient 5xx failed the whole step — blocking the pr-review-mention
+          # ring1→stable canary soak. The ack is cosmetic; the review dispatch in the
+          # next step is what matters, so swallow a comment-side failure as a warning.
+          gh pr comment "$PR_URL" --body "$(printf '<!-- pr-review-agent mention-ack -->\n%s' "${MSG}")" \
+            || echo "::warning::could not post ack comment on $PR_URL (comment cap / API error) — continuing"
+
+      - name: Trigger review agent
+        if: steps.trust.outputs.trusted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+        run: |
+          # repository_dispatch requires only Contents: write, not Actions: write.
+          # pr-review.yml in .github-private listens for "pr-review-mention" and
+          # extracts client_payload.pr_url to run the cascade.
+          gh api \
+            --method POST \
+            --header "Accept: application/vnd.github+json" \
+            /repos/petry-projects/.github-private/dispatches \
+            --field event_type=pr-review-mention \
+            --field "client_payload[pr_url]=$PR_URL"
+          echo "Dispatch sent for $PR_URL"

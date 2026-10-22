@@ -1,0 +1,44 @@
+name: duplicate-decl-gate
+
+# Required CI gate against the #1485 corruption class, ported from
+# petry-projects/.github-private (#1520) into this repo (#1025). Fails any PR (or
+# main push) whose tree contains a top-level declaration declared more than once
+# — a duplicate top-level function in a shell file, a duplicate top-level
+# (H1/H2) heading in a markdown file, or a duplicate object key / unparseable
+# JSON file. That is the signature that reached trunk unguarded in PR #1024
+# (duplicated functions in canary-rollout.sh / compliance-audit.sh, a doubled
+# AGENTS.md, and an unparseable apply-repo-settings.sh).
+#
+# Runs on EVERY pull request — no paths filter — because a required check that is
+# path-skipped never reports and blocks the merge forever; the scan itself costs
+# seconds. The detection logic lives in the pure scripts/check-duplicate-decls.sh
+# (bats-gated by duplicate-decl-gate-tests.yml); this workflow is thin glue.
+#
+# Maintainer action after this lands: the `duplicate-decl-gate` required status
+# check is codified in standards/rulesets/duplicate-decl-gate.json — apply it to
+# the reusable-hosting meta-repos:
+#   GH_TOKEN=<admin> bash scripts/apply-rulesets.sh --repo petry-projects/.github duplicate-decl-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: duplicate-decl-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  duplicate-decl-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reject duplicate top-level declarations
+        run: bash scripts/check-duplicate-decls.sh

@@ -1,0 +1,404 @@
+# >>> BEGIN petry-projects secrets baseline (managed by .github — do not edit) >>>
+# ============================================================================
+# petry-projects baseline .gitignore — SECRETS ONLY
+# ----------------------------------------------------------------------------
+# First layer of defense in the Push Protection Standard
+# (standards/push-protection.md). Complements GitHub secret scanning + push
+# protection, gitleaks pre-commit hooks, and the CI gitleaks job.
+#
+# Scope: SECRETS ONLY. This file is intentionally language-agnostic. Put
+# build artifacts, OS cruft, and editor swap files in per-repo .gitignores or
+# the matching language template from https://github.com/github/gitignore.
+#
+# Ordering note: keep `!` negations IMMEDIATELY AFTER the broad pattern they
+# carve out of. Git evaluates rules top-to-bottom; a later ignore can re-hide
+# a previously-negated file. A negation inside an already-ignored directory
+# does NOT re-include it — always negate by file, never by directory.
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# 1. Dotenv family
+# ---------------------------------------------------------------------------
+# .env files are the single most common source of leaked credentials on GitHub.
+.env
+.env.*
+.envrc
+.env.local
+.env.*.local
+# Keep committed templates so contributors know which vars to set.
+!.env.example
+!.env.sample
+!.env.template
+!.env.*.example
+!.env.*.sample
+!.env.*.template
+# direnv and dotenv-vault artifacts that can contain plaintext values
+.direnv/
+.envrc.local
+.env.vault.keys
+
+
+# ---------------------------------------------------------------------------
+# 2. Cloud provider credential files
+# ---------------------------------------------------------------------------
+# AWS shared credentials & SSO/CLI token caches (live AccessKey / SessionToken)
+.aws/
+aws.credentials
+aws_credentials
+credentials.csv
+# GCP service-account JSON keys and Application Default Credentials
+gcp-key.json
+gcp-service-account*.json
+service-account*.json
+service_account*.json
+application_default_credentials.json
+gha-creds-*.json
+# Azure CLI profile / MSAL token cache
+.azure/
+azureProfile.json
+azureAuth.json
+msal_token_cache.*
+# DigitalOcean, Linode, Hetzner, Fly, Vercel, Netlify, Cloudflare
+.doctl/
+.linode-cli
+.hcloud/
+.fly/
+fly.toml.local
+.vercel/
+.netlify/
+.wrangler/
+.cloudflared/
+
+
+# ---------------------------------------------------------------------------
+# 3. Kubernetes / container / Helm secrets
+# ---------------------------------------------------------------------------
+# kubeconfigs embed bearer tokens and client certs
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+.kube/
+# Docker registry auth (base64 basic auth for registries)
+.docker/config.json
+docker-config.json
+.dockercfg
+# Helm values files that conventionally hold secrets
+secrets.yaml
+secrets.yml
+values.secret.yaml
+values.secret.yml
+values-secrets.yaml
+values-secrets.yml
+*.secrets.yaml
+*.secrets.yml
+# helm-secrets / sops-encrypted values are SAFE to commit — re-allow:
+!*.enc.yaml
+!*.enc.yml
+!secrets.enc.yaml
+!secrets.enc.yml
+# Skaffold / Tilt local overrides
+skaffold.local.yaml
+tilt_config.json
+
+
+# ---------------------------------------------------------------------------
+# 4. SSH / TLS / GPG key material
+# ---------------------------------------------------------------------------
+# Private keys — any common format
+*.pem
+*.key
+*.cer
+*.der
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+id_rsa
+id_rsa.*
+id_dsa
+id_dsa.*
+id_ecdsa
+id_ecdsa.*
+id_ed25519
+id_ed25519.*
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+known_hosts
+authorized_keys
+# GPG / PGP
+*.gpg
+*.pgp
+*.asc
+secring.*
+# Re-allow common PUBLIC artifacts that legitimately live in repos
+!*.pub
+!*.pub.pem
+!public.pem
+!public_key.pem
+!*.crt
+!ca.crt
+!*.cert
+# NOTE: *.pem / *.key have HIGH false-positive rates (TLS test fixtures, JWT
+# libraries, webpack dev certs). Per-repo .gitignores should `!` specific
+# fixture FILES — never negate a whole directory.
+
+
+# ---------------------------------------------------------------------------
+# 5. Terraform / IaC state and variables
+# ---------------------------------------------------------------------------
+# State files contain plaintext secrets resolved at apply-time
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+# .tfvars routinely hold secrets — block all, allow only examples
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.sample
+!example.tfvars
+# Local .terraform cache
+.terraform/
+.terraform.lock.hcl.bak
+# Pulumi stack configs (often hold encrypted + plaintext values)
+Pulumi.*.yaml
+!Pulumi.yaml
+# Ansible vault password files
+vault-password
+vault_password
+.vault_pass
+.vault-password-file
+
+
+# ---------------------------------------------------------------------------
+# 6. Secret manager local caches & key material
+# ---------------------------------------------------------------------------
+# SOPS / age — private keys are plaintext files
+.sops/
+sops.agekey
+age.key
+age-key.txt
+keys.txt
+# HashiCorp Vault token files
+.vault-token
+.vault_token
+vault-token
+# Doppler CLI config (contains service tokens)
+.doppler.yaml
+.doppler/
+doppler.yaml
+# 1Password CLI session tokens / service-account tokens
+.op/
+op-session-*
+.1password/
+# Infisical, Bitwarden CLI, chamber, envchain, teller
+.infisical.json
+.bw-session
+.chamber
+.teller.yml
+
+
+# ---------------------------------------------------------------------------
+# 7. Database dumps and DB client dotfiles
+# ---------------------------------------------------------------------------
+# Raw dumps frequently contain PII + embedded credentials in CREATE USER stmts
+*.sql.gz
+*.sql.bz2
+*.sql.xz
+*.sql.zst
+*.dump
+*.bak
+dump.rdb
+mongodump/
+# Client config dotfiles that store passwords in plaintext
+.pgpass
+.my.cnf
+.mylogin.cnf
+.mongorc.js
+.mongoshrc.js
+.psqlrc.local
+.pg_service.conf
+
+
+# ---------------------------------------------------------------------------
+# 8. Package registry / tooling credential dotfiles
+# ---------------------------------------------------------------------------
+# Recent supply-chain attacks specifically targeted these files.
+.npmrc
+.yarnrc
+.yarnrc.yml
+.pypirc
+.gem/credentials
+.gem/
+.cargo/credentials
+.cargo/credentials.toml
+.nuget/
+nuget.config
+NuGet.Config
+.m2/settings.xml
+.gradle/gradle.properties
+gradle-local.properties
+.netrc
+_netrc
+.curlrc
+.wgetrc
+# GH CLI / Git Credential Manager
+.gh-token
+gh_token
+.git-credentials
+.config/gh/hosts.yml
+# NOTE: .npmrc / .yarnrc.yml / nuget.config / gradle.properties also hold
+# legitimate non-secret config. The safer pattern is to commit a `.npmrc.example`
+# and keep the real file ignored. A per-repo override may re-allow a scrubbed
+# root file via `!/.npmrc` if absolutely needed.
+
+
+# ---------------------------------------------------------------------------
+# 9. Cloud CLI session / token caches
+# ---------------------------------------------------------------------------
+# These rarely end up in repos, but when they do they grant live access —
+# usually inside a Dockerfile COPY context that swept in a home dir.
+.aws/sso/cache/
+.aws/cli/cache/
+.config/gcloud/
+.config/gcloud/application_default_credentials.json
+.config/gcloud/legacy_credentials/
+.config/gcloud/access_tokens.db
+.boto
+.s3cfg
+.rclone.conf
+rclone.conf
+.oci/
+.ibmcloud/
+.snowflake/
+.snowsql/config
+.databricks/
+.databrickscfg
+
+
+# ---------------------------------------------------------------------------
+# 10. IDE files known to cache credentials
+# ---------------------------------------------------------------------------
+# JetBrains: workspace.xml can cache DB passwords; dataSources.local.xml
+# holds per-user DB state. dataSources.xml (no .local) is intended for
+# sharing and should not hold passwords — but review before committing.
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+.idea/dataSources.local.xml
+.idea/dataSources/
+.idea/sqlDataSources.xml
+.idea/dynamic.xml
+.idea/**/aws.xml
+# VS Code: sftp.json from the popular SFTP extension embeds passwords.
+# Block local-variant settings; the shared settings.json stays committable.
+.vscode/sftp.json
+.vscode/ftp-sync.json
+.vscode/settings.local.json
+.vscode-server/
+# Eclipse secure storage
+.metadata/.plugins/org.eclipse.core.runtime/.settings/org.eclipse.equinox.security*
+# Cursor / Windsurf / Zed AI assistant caches (2025+)
+.cursor/mcp.json
+.cursor-server/
+.windsurf/
+.zed/settings.json
+# NOTE: do NOT blanket-ignore .idea/ or .vscode/ here — that's a per-repo
+# editor-cruft decision, not a secrets decision.
+
+
+# ---------------------------------------------------------------------------
+# 11. Generic "secret" / "credential" / "private" filename conventions
+# ---------------------------------------------------------------------------
+secrets.json
+secrets.toml
+secrets.env
+secret.yaml
+secret.yml
+secret.json
+credentials
+credentials.yaml
+credentials.yml
+credentials.json
+credentials.toml
+private.json
+private.yaml
+private.yml
+*.secret
+*.secret.*
+*.secrets
+*.private
+*.private.*
+# Re-allow obviously-public template variants
+!*.secret.example
+!*.secrets.example
+!secrets.example.*
+!credentials.example.*
+# Re-allow SOPS/age-encrypted variants (safe to commit)
+!*.enc.yaml
+!*.enc.yml
+!*.enc.json
+!*.sops.yaml
+!*.sops.yml
+!*.sops.json
+
+
+# ---------------------------------------------------------------------------
+# 12. Modern (2024-2026) credential-leak hotspots
+# ---------------------------------------------------------------------------
+# LLM / AI tooling config files where users paste API keys
+.anthropic/
+.openai/
+.ollama/id_ed25519
+.continue/config.json
+.aider.conf.yml
+.aider.model.settings.yml
+# GitHub Copilot local state
+.github-copilot/
+# Supabase / PlanetScale / Neon / Turso CLI auth
+.supabase/
+.pscale/
+.neon/
+.turso/
+# Railway / Render / Fly machine tokens
+.railway/
+.render/
+# Stripe CLI, Twilio CLI, SendGrid
+.stripe/
+.twilio-cli/
+# Temporal, Dagger, Earthly auth
+.temporalio/
+.dagger/
+.earthly/config.yml
+
+# ---------------------------------------------------------------------------
+# 13. Agent / local worktrees and CI-generated tool artifacts (org coding policy)
+# ---------------------------------------------------------------------------
+# Temporary worktrees created by Claude Code and other agents. Not strictly
+# secret material, but the petry-projects coding guidelines require these
+# paths to be ignored in every repo so an agent's scratch worktree cannot
+# be committed accidentally.
+.claude/worktrees/
+.worktrees/
+.dev-lead/
+# CI downloads actionlint into the repo root during linting; ignore the
+# generated binary so local lint runs cannot accidentally commit it.
+actionlint
+actionlint.tar.gz
+
+# ============================================================================
+# End of petry-projects secrets baseline
+# ============================================================================
+# <<< END petry-projects secrets baseline <<<
+#
+# L2 — ecosystem/OS extension (per-repo, free to edit): append language,
+# framework, and OS entries BELOW this line from the matching template at
+# https://github.com/github/gitignore. Never edit inside the markers above,
+# and never re-ignore a path the L1 block negates. See
+# standards/gitignore-standard.md.

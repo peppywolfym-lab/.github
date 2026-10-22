@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/initiative-planner.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md
+# Reusable:        petry-projects/.github/.github/workflows/initiative-planner-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All idea→initiative dispatch logic (the
+#     `idea:approved` gate, the trusted-actor check, and the cross-repo dispatch
+#     to the central BMAD Scrum Master planner) lives in the reusable above.
+#   • You MUST NOT change: the `uses:` ref — it is pinned to the
+#     `initiative-planner/stable` channel, a moving tag advanced centrally.
+#     Never repoint it to `@main`, a SHA, or a frozen `@vX` (see
+#     ci-standards.md → Reusable workflow versioning). Also do not change the
+#     trigger events or the `secrets:` block.
+#   • If you need different behaviour, open a PR against the reusable in the
+#     central repo. A new release is rolled out by moving the channel tag
+#     centrally — never by editing callers, so no fanout PR is needed.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Initiative Planner — approval trigger, thin caller for the org-level reusable.
+#
+# When a maintainer adds `idea:approved` to an Ideas Discussion in this repo,
+# the reusable re-dispatches the CENTRAL initiative-planner (BMAD Scrum Master
+# "Bob") in petry-projects/.github-private with this repo as the target. Bob
+# reads this repo's Discussion and materializes an inert epic + sub-issue DAG
+# here (labelled `initiative`, NOT `initiative:auto`). A maintainer then adds
+# `initiative:auto` to the epic to hand it to initiative-driver. The frameworks
+# and planning logic stay vendored once, centrally.
+#
+# To adopt:
+#   1. Copy this file to .github/workflows/initiative-planner.yml in your repo.
+#   2. Ensure GitHub Discussions is enabled with an "Ideas" category.
+#   3. Ensure the `idea:approved` label exists on the repo.
+#   4. Confirm the org-level secret GH_PAT_WORKFLOWS is accessible.
+#
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+name: Initiative Planner — Approval Trigger
+
+on:
+  discussion:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  initiative-planner:
+    # Self-host: petry-projects/.github HOSTS the reusable, so this in-repo copy
+    # uses a LOCAL ref (always current) — not the `@initiative-planner/v1-stable`
+    # remote channel that CONSUMER repos pin (see standards/workflows/initiative-planner.yml).
+    # Mirrors add-to-project.yml / pr-review-mention.yml; local refs also avoid the
+    # SHA-pin security finding a remote tag ref raises on the hosting repo.
+    uses: ./.github/workflows/initiative-planner-reusable.yml
+    secrets: inherit  # NOSONAR(githubactions:S7635) first-party trusted reusable

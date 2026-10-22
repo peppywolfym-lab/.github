@@ -1,0 +1,260 @@
+# Reusable dependency vulnerability audit — single source of truth for the org.
+# Repo-level dependency-audit.yml files call this to avoid duplicating the
+# multi-ecosystem detection and audit logic.
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md#5-dependency-audit-dependency-auditym
+#
+# Auto-detects ecosystems present in the repository and runs the appropriate
+# audit tool. Fails the build if any dependency has a known security advisory.
+#
+# Pinned tool versions (update deliberately):
+#   govulncheck v1.1.4 | cargo-audit 0.22.1 | pip-audit 2.9.0
+name: Dependency audit (Reusable)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect ecosystems
+    runs-on: ubuntu-latest
+    outputs:
+      npm: ${{ steps.check.outputs.npm }}
+      pnpm: ${{ steps.check.outputs.pnpm }}
+      gomod: ${{ steps.check.outputs.gomod }}
+      cargo: ${{ steps.check.outputs.cargo }}
+      pip: ${{ steps.check.outputs.pip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Detect package ecosystems
+        id: check
+        run: |
+          # npm — look for package-lock.json anywhere (excluding node_modules)
+          if find . -name 'package-lock.json' -not -path '*/node_modules/*' | grep -q .; then
+            echo "npm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # pnpm — look for pnpm-lock.yaml anywhere
+          if find . -name 'pnpm-lock.yaml' -not -path '*/node_modules/*' | grep -q .; then
+            echo "pnpm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pnpm=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Go modules — detect via go.mod (not go.sum, which may not exist)
+          if find . -name 'go.mod' -not -path '*/vendor/*' | grep -q .; then
+            echo "gomod=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gomod=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Cargo — detect via Cargo.toml anywhere (lockfile may not exist for libraries)
+          if find . -name 'Cargo.toml' -not -path '*/target/*' | grep -q .; then
+            echo "cargo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cargo=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Python — detect pyproject.toml or requirements.txt anywhere
+          if find . -name 'pyproject.toml' -not -path '*/.venv/*' -not -path '*/venv/*' | grep -q . || \
+             find . -name 'requirements.txt' -not -path '*/.venv/*' -not -path '*/venv/*' | grep -q .; then
+            echo "pip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  audit-npm:
+    name: npm audit
+    needs: detect
+    if: needs.detect.outputs.npm == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "lts/*"
+
+      - name: Audit npm dependencies
+        run: |
+          # Audit each package-lock.json found in the repo
+          status=0
+          while IFS= read -r dir; do
+            echo "::group::npm audit $dir"
+            if ! (cd "$dir" && npm audit --audit-level=low); then
+              status=1
+            fi
+            echo "::endgroup::"
+          done < <(find . -name 'package-lock.json' -not -path '*/node_modules/*' -exec dirname {} \;)
+          exit $status
+
+  audit-pnpm:
+    name: pnpm audit
+    needs: detect
+    if: needs.detect.outputs.pnpm == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "lts/*"
+
+      - name: Audit pnpm dependencies
+        run: |
+          # Audit each pnpm-lock.yaml found in the repo
+          status=0
+          while IFS= read -r dir; do
+            echo "::group::pnpm audit $dir"
+            if ! (cd "$dir" && pnpm audit --audit-level low); then
+              status=1
+            fi
+            echo "::endgroup::"
+          done < <(find . -name 'pnpm-lock.yaml' -not -path '*/node_modules/*' -exec dirname {} \;)
+          exit $status
+
+  audit-go:
+    name: govulncheck
+    needs: detect
+    if: needs.detect.outputs.gomod == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
+        with:
+          go-version: "stable"
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4  # NOSONAR(githubactions:S8545) pinned @vX.Y.Z is reproducible (verified via Go checksum DB); no --locked equivalent
+
+      - name: Audit Go dependencies
+        run: |
+          status=0
+          while IFS= read -r dir; do
+            echo "::group::govulncheck $dir"
+            if ! (cd "$dir" && govulncheck ./...); then
+              status=1
+            fi
+            echo "::endgroup::"
+          done < <(find . -name 'go.mod' -not -path '*/vendor/*' -exec dirname {} \;)
+          exit $status
+
+  audit-cargo:
+    name: cargo audit
+    needs: detect
+    if: needs.detect.outputs.cargo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit@0.22.1 --locked
+
+      - name: Audit Cargo dependencies
+        run: |
+          # cargo audit operates on Cargo.lock at workspace root, so for a
+          # workspace a single audit at the root covers every member crate.
+          # Iterating every Cargo.toml would re-audit the same lockfile N
+          # times in workspaces.
+          #
+          # Strategy:
+          #   1. Find every Cargo.toml that declares [workspace] — those
+          #      are workspace roots; emit them.
+          #   2. Find every Cargo.toml that does NOT declare [workspace];
+          #      those are either standalone crates or workspace members.
+          #      Emit them only if no parent dir is already a workspace
+          #      root we found in step 1.
+          status=0
+
+          mapfile -t WORKSPACES < <(
+            find . -name Cargo.toml -not -path '*/target/*' -print0 \
+              | xargs -0 grep -l '^\[workspace\]' 2>/dev/null \
+              | xargs -n1 dirname 2>/dev/null \
+              | sort -u
+          )
+
+          mapfile -t NON_WORKSPACES < <(
+            find . -name Cargo.toml -not -path '*/target/*' -print0 \
+              | xargs -0 grep -L '^\[workspace\]' 2>/dev/null \
+              | xargs -n1 dirname 2>/dev/null \
+              | sort -u
+          )
+
+          # Standalone crates: those whose dir is not under any workspace root
+          STANDALONE=()
+          for dir in "${NON_WORKSPACES[@]}"; do
+            covered=0
+            for ws in "${WORKSPACES[@]}"; do
+              # Trim trailing slash from $ws for accurate prefix match
+              ws_trim="${ws%/}"
+              case "$dir/" in
+                "$ws_trim/"*) covered=1; break ;;
+              esac
+            done
+            if [ "$covered" -eq 0 ]; then
+              STANDALONE+=("$dir")
+            fi
+          done
+
+          for dir in "${WORKSPACES[@]}" "${STANDALONE[@]}"; do
+            echo "::group::cargo audit $dir"
+            if ! (cd "$dir" && cargo generate-lockfile 2>/dev/null; cargo audit); then
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+  audit-pip:
+    name: pip-audit
+    needs: detect
+    if: needs.detect.outputs.pip == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      - name: Install pip-audit
+        run: 'pip install --require-hashes --only-binary :all: -r scripts/pip-audit-requirements.txt'
+
+      - name: Audit Python dependencies
+        run: |
+          status=0
+          # Audit each Python project found in the repo. Some projects ship
+          # both pyproject.toml (tooling/build) and requirements.txt (pinned
+          # runtime deps) — audit BOTH when both are present rather than
+          # short-circuiting on pyproject.toml.
+          while IFS= read -r dir; do
+            echo "::group::pip-audit $dir"
+            if [ -f "$dir/pyproject.toml" ]; then
+              if ! pip-audit "$dir"; then
+                status=1
+              fi
+            fi
+            if [ -f "$dir/requirements.txt" ]; then
+              if ! pip-audit -r "$dir/requirements.txt"; then
+                status=1
+              fi
+            fi
+            echo "::endgroup::"
+          done < <(
+            {
+              find . -name 'pyproject.toml' -not -path '*/.venv/*' -not -path '*/venv/*' -exec dirname {} \;
+              find . -name 'requirements.txt' -not -path '*/.venv/*' -not -path '*/venv/*' -exec dirname {} \;
+            } | sort -u
+          )
+          exit $status

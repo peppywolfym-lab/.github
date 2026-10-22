@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/add-to-project.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md
+# Reusable:        petry-projects/.github/.github/workflows/add-to-project-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All noise-gate / reconcile logic lives
+#     in the reusable workflow above.
+#   • You MAY change: nothing in normal use. The `uses:` ref and `agent_ref`
+#     are pinned to the `add-to-project/v1-stable` channel and move with it — do
+#     not change them to `@main` or a SHA (see ci-standards.md → Reusable
+#     workflow versioning).
+#   • You MUST NOT change: trigger events, the concurrency group, or the
+#     job-level `permissions:` block — a reusable can be granted no more
+#     permissions than the calling job has.
+#   • If you need different behaviour, open a PR against the reusable.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Track this repo's issues (all, un-gated) and dev-lead-labeled PRs on the
+# org-level Initiatives project
+# (https://github.com/orgs/petry-projects/projects/1). Ideas live in
+# Discussions and are not tracked here.
+#
+# To adopt: copy this file to .github/workflows/add-to-project.yml in your
+# repo. Requires the org secrets INITIATIVES_APP_ID and
+# INITIATIVES_APP_PRIVATE_KEY (the petry-projects-planner GitHub App), and the
+# app installation must include this repo. See petry-projects/.github#387.
+#
+# Tracking: petry-projects/.github#387, #415
+name: Auto-add to Initiatives project
+
+on:
+  issues:
+    types: [opened, labeled, unlabeled, reopened]
+  pull_request_target:
+    types: [opened, labeled, unlabeled, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: >-
+    add-to-project-${{ format('{0}-{1}', github.event_name,
+       github.event.issue.number || github.event.pull_request.number) }}
+  cancel-in-progress: false
+
+jobs:
+  add-to-project:
+    permissions:
+      contents: read
+    uses: petry-projects/.github/.github/workflows/add-to-project-reusable.yml@add-to-project/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    with:
+      project_id: PVT_kwDOD2inqs4BZq3-
+      project_url: https://github.com/orgs/petry-projects/projects/1
+      agent_ref: add-to-project/v1-stable
+    # Pass only the secrets the reusable declares (least privilege; avoids
+    # `secrets: inherit` handing the reusable every org secret).
+    secrets:
+      INITIATIVES_APP_ID: ${{ secrets.INITIATIVES_APP_ID }}
+      INITIATIVES_APP_PRIVATE_KEY: ${{ secrets.INITIATIVES_APP_PRIVATE_KEY }}

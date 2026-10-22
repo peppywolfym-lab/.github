@@ -1,0 +1,14 @@
+[
+  {
+    "number": 60,
+    "title": "feat: weekly ideation workflow",
+    "labels": [],
+    "mergedAt": "2099-04-01T00:00:00Z"
+  },
+  {
+    "number": 10,
+    "title": "old merged PR",
+    "labels": [],
+    "mergedAt": "2020-01-01T00:00:00Z"
+  }
+]

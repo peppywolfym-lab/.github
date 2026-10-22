@@ -1,0 +1,106 @@
+# Quality gates for the org-standard workflow deploy tooling.
+#
+# Triggered on any PR that touches:
+#   - scripts/deploy-standard-workflows.sh
+#   - scripts/standards-deploy-driver.sh
+#   - scripts/lib/standards-deploy.sh
+#   - test/scripts/deploy-standard-workflows/**
+#   - test/scripts/standards-deploy-driver/**
+#   - test/scripts/lib/standards-deploy.bats
+#
+# Gates (all must pass before merge):
+#   1. shellcheck — static analysis for the deploy script + shared lib
+#   2. bats       — unit tests for sd_deploy_via_pr() and the dry-run path
+#
+# Standard: the PR-based deploy primitive documented in
+# scripts/lib/standards-deploy.sh (see petry-projects/.github#478).
+
+name: Standards Deploy Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/deploy-standard-workflows.sh'
+      - 'scripts/standards-deploy-driver.sh'
+      - 'scripts/lib/standards-deploy.sh'
+      - 'scripts/lib/ring-pins.sh'
+      - 'test/scripts/deploy-standard-workflows/**'
+      - 'test/scripts/standards-deploy-driver/**'
+      - 'test/scripts/lib/standards-deploy.bats'
+      - 'test/scripts/lib/ring-pins.bats'
+      - '.github/workflows/standards-deploy.yml'
+      - '.github/workflows/standards-deploy-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/deploy-standard-workflows.sh'
+      - 'scripts/standards-deploy-driver.sh'
+      - 'scripts/lib/standards-deploy.sh'
+      - 'scripts/lib/ring-pins.sh'
+      - 'test/scripts/deploy-standard-workflows/**'
+      - 'test/scripts/standards-deploy-driver/**'
+      - 'test/scripts/lib/standards-deploy.bats'
+      - 'test/scripts/lib/ring-pins.bats'
+      - '.github/workflows/standards-deploy.yml'
+      - '.github/workflows/standards-deploy-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standards-deploy-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and bats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Install bats, shellcheck, and jq
+        # Retry the apt update+install: a single transient mirror/CDN blip
+        # (5xx, hash mismatch, DNS hiccup) would otherwise red the whole job and
+        # skew the fleet failure-rate metric. Three attempts with backoff; the
+        # step fails only if every attempt fails. The final attempt uses -q
+        # instead of -qq so apt output is visible in CI logs when all retries fail.
+        run: |
+          set -euo pipefail
+          installed=0
+          for attempt in 1 2 3; do
+            apt_flags=(-qq)
+            [ "${attempt}" -eq 3 ] && apt_flags=(-q)
+            if sudo apt-get update "${apt_flags[@]}" \
+              && sudo apt-get install -y --no-install-recommends bats shellcheck jq; then
+              installed=1
+              break
+            fi
+            echo "apt install attempt ${attempt} failed" >&2
+            [ "${attempt}" -lt 3 ] && sleep $((attempt * 5))
+          done
+          if [ "${installed}" -ne 1 ]; then
+            echo "apt install failed after 3 attempts" >&2
+            exit 1
+          fi
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning -x \
+            scripts/deploy-standard-workflows.sh \
+            scripts/standards-deploy-driver.sh \
+            scripts/lib/standards-deploy.sh \
+            scripts/lib/ring-pins.sh
+
+      - name: Run bats suite
+        run: |
+          bats --print-output-on-failure \
+            test/scripts/lib/standards-deploy.bats \
+            test/scripts/lib/ring-pins.bats \
+            test/scripts/deploy-standard-workflows/ \
+            test/scripts/standards-deploy-driver/

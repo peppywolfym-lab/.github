@@ -1,0 +1,10 @@
+title = "gitleaks config"
+
+# Add repo-specific allowlists below.
+# Common false-positive paths:
+#   '''_bmad/'''  — BMAD knowledge/config files (not application secrets)
+[allowlist]
+description = "Allowlisted paths"
+paths = [
+  '''_bmad/''',
+]

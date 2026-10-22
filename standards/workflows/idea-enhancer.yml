@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/idea-enhancer.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md
+# Reusable:        petry-projects/.github/.github/workflows/idea-enhancer-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All enhancement-dispatch logic (including
+#     the Ideas-category / non-bot guard) lives in the reusable above.
+#   • You MUST NOT change: the `uses:` ref — it is pinned to the
+#     `idea-enhancer/v1-stable` channel, a moving tag advanced centrally. Never
+#     repoint it to `@main`, a SHA, or a frozen `@vX`. Do not change the trigger
+#     events or the `secrets:` block.
+#   • You MAY change: the cron schedule if the weekly cadence doesn't suit.
+#   • If you need different behaviour, open a PR against the reusable in the
+#     central repo. A new release is rolled out by moving the channel tag
+#     centrally — never by editing callers.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Idea Enhancer — enrich human-authored ideas, thin caller for the org reusable.
+#
+# When a human opens a new Ideas Discussion in this repo (or on a weekly sweep),
+# this re-dispatches the CENTRAL idea-enhancer (BMAD analyst) in
+# petry-projects/.github-private with this repo as the target. It posts one
+# enrichment comment per open, human-authored, not-yet-enhanced idea. It is
+# idempotent (a hidden marker prevents re-enhancement) and never approves,
+# labels, or promotes — that stays with triage and the human gates.
+#
+# To adopt:
+#   1. Copy this file to .github/workflows/idea-enhancer.yml in your repo.
+#   2. Ensure GitHub Discussions is enabled with an "Ideas" category.
+#   3. Confirm the org-level secret GH_PAT_WORKFLOWS is accessible.
+#   4. (Optional) Adjust the schedule cron.
+#
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+name: Idea Enhancer — Enrich Ideas
+
+on:
+  discussion:
+    types: [created]
+  schedule:
+    - cron: '0 8 * * 3' # Wednesday 08:00 UTC — safety-net sweep (after the central run)
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  idea-enhancer:
+    uses: petry-projects/.github/.github/workflows/idea-enhancer-reusable.yml@idea-enhancer/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    secrets: inherit  # NOSONAR(githubactions:S7635) first-party trusted reusable

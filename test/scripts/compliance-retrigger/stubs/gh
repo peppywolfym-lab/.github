@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Smart gh stub for compliance-retrigger tests.
+# Routes responses based on endpoint patterns in argv.
+#
+# Env vars:
+#   GH_STUB_LOG        — append-only log of all invocations (quoted args, one per line)
+#   GH_STUB_ENABLE_LOG — append-only log of workflow-enable PUT calls specifically
+#   GH_STUB_REPOS      — newline-separated repo names returned for org repos listing
+#                        (default: "test-repo")
+#   GH_STUB_WORKFLOW_STATE — state string returned for dev-lead.yml queries
+#                            (default: "disabled_manually")
+#   GH_STUB_EXIT       — exit code for unmatched calls (default: 0)
+#   GH_STUB_SEARCH_FAIL_TIMES — number of search/issues calls (starting at call
+#                            GH_STUB_SEARCH_FAIL_START) that should fail (exit 1,
+#                            emit an error body) before succeeding. Simulates
+#                            transient API errors (rate limit / 5xx). Uses a
+#                            counter file to persist the fail count across stub
+#                            invocations.
+#   GH_STUB_SEARCH_FAIL_START — 1-based call index at which failures start
+#                            (default: 1, i.e., the very first call).
+#   GH_STUB_SEARCH_FAIL_FILE — path to the counter file for the above
+#                            (default: "<dir of GH_STUB_LOG>/search_fail.count").
+#   GH_STUB_SEARCH_ZERO_EXIT_ERROR_TIMES — number of initial search/issues calls
+#                            that should return error JSON with exit 0, exercising
+#                            the caller's zero-exit error-response validation.
+
+set -euo pipefail
+
+if [ -n "${GH_STUB_LOG:-}" ]; then
+  printf '%q ' "$@" >>"$GH_STUB_LOG"
+  printf '\n' >>"$GH_STUB_LOG"
+fi
+
+# Detect workflow enable calls (gh api -X PUT .../enable)
+for arg in "$@"; do
+  if [[ "$arg" == */enable ]]; then
+    if [ -n "${GH_STUB_ENABLE_LOG:-}" ]; then
+      printf '%q ' "$@" >>"$GH_STUB_ENABLE_LOG"
+      printf '\n' >>"$GH_STUB_ENABLE_LOG"
+    fi
+    exit 0
+  fi
+done
+
+# Route responses by endpoint URL
+for arg in "$@"; do
+  case "$arg" in
+    *"orgs/"*"/repos"*)
+      printf '%s\n' "${GH_STUB_REPOS:-test-repo}"
+      exit 0
+      ;;
+    *"search/issues"*)
+      log_dir="${GH_STUB_LOG%/*}"
+      [ "$log_dir" = "${GH_STUB_LOG:-}" ] && log_dir="."
+      counter="${GH_STUB_SEARCH_FAIL_FILE:-${log_dir:-.}/search_fail.count}"
+
+      # Track total search/issues calls to support GH_STUB_SEARCH_FAIL_START.
+      call_counter="${log_dir}/search_call.count"
+      call_n=0
+      [ -f "$call_counter" ] && call_n="$(cat "$call_counter")"
+      call_n=$((call_n + 1))
+      printf '%s\n' "$call_n" >"$call_counter"
+
+      # Zero-exit error: exit 0 with error JSON, exercising caller's validation.
+      zero_exit_times="${GH_STUB_SEARCH_ZERO_EXIT_ERROR_TIMES:-0}"
+      if [ "$zero_exit_times" -gt 0 ]; then
+        ze_counter="${log_dir}/search_ze.count"
+        ze_n=0
+        [ -f "$ze_counter" ] && ze_n="$(cat "$ze_counter")"
+        if [ "$ze_n" -lt "$zero_exit_times" ]; then
+          printf '%s\n' "$((ze_n + 1))" >"$ze_counter"
+          printf '{"message":"API rate limit exceeded","documentation_url":"https://docs.github.com/rest"}\n'
+          exit 0
+        fi
+      fi
+
+      fail_times="${GH_STUB_SEARCH_FAIL_TIMES:-0}"
+      fail_start="${GH_STUB_SEARCH_FAIL_START:-1}"
+      if [ "$fail_times" -gt 0 ] && [ "$call_n" -ge "$fail_start" ]; then
+        n=0
+        [ -f "$counter" ] && n="$(cat "$counter")"
+        if [ "$n" -lt "$fail_times" ]; then
+          printf '%s\n' "$((n + 1))" >"$counter"
+          printf '{"message":"API rate limit exceeded","documentation_url":"https://docs.github.com/rest"}\n'
+          exit 1
+        fi
+      fi
+      printf '{"total_count":0,"items":[]}\n'
+      exit 0
+      ;;
+    *"actions/workflows/dev-lead.yml"*)
+      printf '%s\n' "${GH_STUB_WORKFLOW_STATE:-disabled_manually}"
+      exit 0
+      ;;
+  esac
+done
+
+exit "${GH_STUB_EXIT:-0}"

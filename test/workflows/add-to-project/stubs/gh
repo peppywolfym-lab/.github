@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Fake `gh` binary used by add-to-project bats tests.
+# Identical mechanism to test/workflows/feature-ideation/stubs/gh:
+# behavior is driven by env vars so tests can script success/failure
+# and multi-call sequences without per-fixture stub variants.
+#
+# Single-call mode env:
+#   GH_STUB_STDOUT  literal text or @file:/abs/path to load from disk
+#   GH_STUB_STDERR  literal text or @file:/abs/path
+#   GH_STUB_EXIT    exit code (default 0)
+#
+# Always logs argv (when GH_STUB_LOG is set) so tests can re-parse what
+# was invoked. Each line is shell-quoted with `printf '%q '` so spaces
+# and special chars round-trip losslessly.
+#
+# Multi-call mode (GH_STUB_SCRIPT): one
+#   EXIT\tSTDOUT_PATH\tSTDERR_PATH
+# line per expected invocation, advanced by a per-test counter file.
+
+set -euo pipefail
+
+if [ -n "${GH_STUB_LOG:-}" ]; then
+  # shellcheck disable=SC2059
+  printf '%q ' "$@" >>"$GH_STUB_LOG"
+  printf '\n' >>"$GH_STUB_LOG"
+fi
+
+if [ -n "${GH_STUB_SCRIPT:-}" ] && [ ! -f "${GH_STUB_SCRIPT}" ]; then
+  printf '[gh-stub] GH_STUB_SCRIPT is set but file not found: %s\n' "$GH_STUB_SCRIPT" >&2
+  exit 1
+fi
+if [ -n "${GH_STUB_SCRIPT:-}" ] && [ -f "${GH_STUB_SCRIPT}" ]; then
+  counter_file="${TT_TMP:-${BATS_TEST_TMPDIR:-/tmp}}/.gh-stub-counter"
+  count=0
+  if [ -f "$counter_file" ]; then
+    count=$(cat "$counter_file")
+  fi
+  next=$((count + 1))
+  printf '%s' "$next" >"$counter_file"
+
+  line=$(sed -n "${next}p" "$GH_STUB_SCRIPT")
+  if [ -z "$line" ]; then
+    printf '[gh-stub] no script entry for call #%d\n' "$next" >&2
+    exit 99
+  fi
+  exit_code=$(printf '%s' "$line" | awk -F'\t' '{print $1}')
+  stdout_path=$(printf '%s' "$line" | awk -F'\t' '{print $2}')
+  stderr_path=$(printf '%s' "$line" | awk -F'\t' '{print $3}')
+
+  if [ -n "$stdout_path" ] && [ "$stdout_path" != "-" ]; then
+    cat "$stdout_path"
+  fi
+  if [ -n "$stderr_path" ] && [ "$stderr_path" != "-" ]; then
+    cat "$stderr_path" >&2
+  fi
+  exit "$exit_code"
+fi
+
+emit() {
+  local var="$1"
+  local stream="$2"
+  local val="${!var:-}"
+  if [ -z "$val" ]; then
+    return 0
+  fi
+  if [[ "$val" == @file:* ]]; then
+    cat "${val#@file:}" >&"$stream"
+  else
+    printf '%s' "$val" >&"$stream"
+  fi
+}
+
+emit GH_STUB_STDOUT 1
+emit GH_STUB_STDERR 2
+
+exit "${GH_STUB_EXIT:-0}"

@@ -1,0 +1,65 @@
+# Quality gate for the PR-limit shared config (the single source of truth), the
+# source-side admission-gate library, and their validating bats tests.
+#
+# Triggered on any PR that touches:
+#   - standards/pr-limits.json
+#   - scripts/lib/pr-limit-gate.sh
+#   - test/scripts/pr-limits/**
+#   - .github/workflows/pr-limits-tests.yml
+#
+# Gate: bats validates that standards/pr-limits.json parses as JSON, the
+# org-wide cap is a positive integer, all required keys exist, the numbers are
+# flagged provisional, and dependabot[bot] is on the exempt list; and that the
+# pr-limit-gate.sh guard returns allow/defer correctly against a stubbed `gh`.
+# ShellCheck of the lib is covered by the existing scripts/**/*.sh job in ci.yml.
+#
+# Context: ADR docs/initiatives/pull-request-limits-adr.md (#506). #507 delivers
+# the data; this admission gate is #561 (Phase 2b); the apply path is #508.
+# Modeled on .github/workflows/auto-rebase-tests.yml.
+
+name: PR-limits Tests
+
+on:
+  pull_request:
+    paths:
+      - 'standards/pr-limits.json'
+      - 'scripts/lib/pr-limit-gate.sh'
+      - 'test/scripts/pr-limits/**'
+      - '.github/workflows/pr-limits-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'standards/pr-limits.json'
+      - 'scripts/lib/pr-limit-gate.sh'
+      - 'test/scripts/pr-limits/**'
+      - '.github/workflows/pr-limits-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-limits-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Validate config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          # Read-only test job — never pushes; don't leave the token in git config.
+          persist-credentials: false
+
+      - name: Install bats and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats jq
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure test/scripts/pr-limits/

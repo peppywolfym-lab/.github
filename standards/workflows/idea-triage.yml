@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/idea-triage.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md
+# Reusable:        petry-projects/.github/.github/workflows/idea-triage-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All triage-dispatch logic lives in the
+#     reusable above.
+#   • You MUST NOT change: the `uses:` ref — it is pinned to the
+#     `idea-triage/v1-stable` channel, a moving tag advanced centrally. Never
+#     repoint it to `@main`, a SHA, or a frozen `@vX`. Do not change the
+#     `secrets:` block.
+#   • You MAY change: the cron schedule if the weekly cadence doesn't suit.
+#   • If you need different behaviour, open a PR against the reusable in the
+#     central repo. A new release is rolled out by moving the channel tag
+#     centrally — never by editing callers.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Idea Triage — weekly ripeness shortlist, thin caller for the org-level reusable.
+#
+# Weekly, this re-dispatches the CENTRAL idea-triage (BMAD analyst) in
+# petry-projects/.github-private with this repo as the target. It scores this
+# repo's open Ideas Discussions (Ripe / Soon / Not yet) and refreshes this repo's
+# "Idea Promotion Queue" tracking issue (label `idea-triage`). It never applies
+# `idea:approved` — that stays the human's pick.
+#
+# To adopt:
+#   1. Copy this file to .github/workflows/idea-triage.yml in your repo.
+#   2. Ensure GitHub Discussions is enabled with an "Ideas" category.
+#   3. Confirm the org-level secret GH_PAT_WORKFLOWS is accessible.
+#   4. (Optional) Adjust the schedule cron.
+#
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+name: Idea Triage — Weekly Shortlist
+
+on:
+  schedule:
+    - cron: '30 13 * * 1' # Monday 13:30 UTC (just after the central dogfood run)
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  idea-triage:
+    uses: petry-projects/.github/.github/workflows/idea-triage-reusable.yml@idea-triage/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    secrets: inherit  # NOSONAR(githubactions:S7635) first-party trusted reusable

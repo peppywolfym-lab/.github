@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/sonarcloud.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md#3-sonarcloud-analysis
+#
+# ADOPTING THIS WORKFLOW:
+#   1. This ships verbatim into repos created from petry-projects/repo-template.
+#   2. Set sonar.projectKey / sonar.organization in sonar-project.properties to
+#      match your repo (see BOOTSTRAP.md), and add the SONAR_TOKEN repo secret.
+#   3. The job name `SonarCloud` is the required status check — keep it.
+#   4. The scan is guarded on SONAR_TOKEN, so the job is a green no-op until the
+#      secret is set — a fresh repo is not blocked on day 0.
+#
+# CONVENTIONS (enforced by the standard):
+#   • permissions: {} at top, least-privilege per job (contents + pull-requests: read)
+#   • triggers: push + pull_request to main; checkout with fetch-depth: 0
+#   • first scan is continue-on-error with a single retry (SonarCloud's analysis
+#     endpoint is occasionally flaky)
+#   • SHA-pin every third-party action (never a tag/branch)
+# ─────────────────────────────────────────────────────────────────────────────
+name: SonarCloud Analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  sonarcloud:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Set up JDK 21
+        id: setup_java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: SonarCloud Scan
+        id: sonar
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
+        continue-on-error: true
+      - name: SonarCloud Scan (retry)
+        if: env.SONAR_TOKEN != '' && steps.sonar.outcome == 'failure'
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0

@@ -1,0 +1,104 @@
+# Reusable repo-settings + branch-policy self-heal — single source of truth for the org.
+# Repo-level apply-repo-settings.yml stubs call this so the compliance self-heal runs
+# from ONE script/workflow pair instead of per-repo forks (petry-projects/.github#984).
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/github-settings.md
+#           https://github.com/petry-projects/.github/blob/main/standards/ruleset-remediation-runbook.md
+#
+# Applies, to the CALLING repo:
+#   - merge settings, security_and_analysis, CodeQL default setup, labels, and
+#     check-suite auto-trigger preferences   (scripts/apply-repo-settings.sh)
+#   - the branch-policy compliance rulesets pr-quality + code-quality
+#     (scripts/apply-rulesets.sh) — the recurring finding this workflow exists to
+#     fix (e.g. pr-quality's require_last_push_approval flipping to false).
+#
+# Credential: the check-suites/preferences endpoint and the ruleset admin calls are
+# legacy — they accept ONLY a classic PAT (or GitHub App token) whose owner has
+# repo-admin. Fine-grained PATs and GITHUB_TOKEN are rejected (403). The org secret
+# GH_PAT_DON_PETRY holds that classic admin PAT; the preflight below fails loud,
+# naming the secret, when it is empty/out-of-scope rather than dying obscurely deep
+# in the script.
+name: Apply repo settings (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: "Preview changes without applying (sets DRY_RUN=true)"
+        type: boolean
+        required: false
+        default: false
+      checkout_ref:
+        description: >-
+          Ref of petry-projects/.github to check out for the scripts, so the
+          logic runs at the same version as this reusable. Callers pin their
+          ring's channel tag (mirrors dev-lead's agent_ref). Empty = default branch.
+        type: string
+        required: false
+        default: ""
+    secrets:
+      GH_PAT_DON_PETRY:
+        description: "Classic PAT with repo scope whose owner has admin on target repos (check-suites/rulesets APIs reject fine-grained PATs and GITHUB_TOKEN)"
+        required: false
+
+permissions: {}  # no default permissions; each job grants only what it needs
+
+jobs:
+  apply:
+    name: Apply settings and rulesets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Preflight — require the admin PAT
+        env:
+          GH_PAT_DON_PETRY: ${{ secrets.GH_PAT_DON_PETRY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_PAT_DON_PETRY:-}" ]]; then
+            _msg="The GH_PAT_DON_PETRY org secret is empty or out of scope for ${GITHUB_REPOSITORY}."
+            _msg+=" It must be a CLASSIC PAT with repo scope whose owner has admin on this repo"
+            _msg+=" — fine-grained PATs and GITHUB_TOKEN are rejected by the check-suites/rulesets APIs."
+            _msg+=" See standards/github-settings.md."
+            echo "::error title=Missing GH_PAT_DON_PETRY::${_msg}"
+            {
+              echo "## Apply repo settings — preflight failed"
+              echo ""
+              echo "\`GH_PAT_DON_PETRY\` is empty or out of scope for \`${GITHUB_REPOSITORY}\`."
+              echo ""
+              echo "Set it as an **org secret** (classic PAT, \`repo\` scope, owner has admin) with visibility covering this repo. See \`standards/github-settings.md\` §Organization-Level Secrets."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "GH_PAT_DON_PETRY present — proceeding."
+
+      - name: Checkout petry-projects/.github (scripts at the pinned channel)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: petry-projects/.github
+          ref: ${{ inputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Apply settings and rulesets to the calling repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        # NOTE: `set -u -o pipefail` but NOT `-e`. The ruleset self-heal is the
+        # load-bearing step (pr-quality convergence, the whole point of this
+        # workflow), so it runs FIRST — and a failure in EITHER script must not
+        # prevent the other from running. That is the exact regression #1038 fixes:
+        # the settings script used to run first under errexit and abort on the
+        # check-suites 403, so the rulesets never converged (30/30 runs). Each
+        # applier is guarded; any failure surfaces a named ::error and a non-zero exit.
+        run: |
+          set -uo pipefail
+          repo="${GITHUB_REPOSITORY##*/}"
+          failed=()
+          echo "Applying branch-policy rulesets (pr-quality, code-quality) to ${repo} ..."
+          bash scripts/apply-rulesets.sh "$repo" || failed+=("rulesets")
+          echo "Applying standard settings to ${repo} (dry_run=${DRY_RUN}) ..."
+          bash scripts/apply-repo-settings.sh "$repo" || failed+=("repo-settings")
+          if (( ${#failed[@]} )); then
+            echo "::error::apply-repo-settings: failed steps: ${failed[*]}"
+            exit 1
+          fi

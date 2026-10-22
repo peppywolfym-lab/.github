@@ -1,0 +1,23 @@
+[
+  {
+    "number": 101,
+    "title": "Add dark mode",
+    "labels": [{"name": "enhancement"}],
+    "createdAt": "2026-03-15T10:00:00Z",
+    "author": {"login": "alice"}
+  },
+  {
+    "number": 102,
+    "title": "Crash on startup",
+    "labels": [{"name": "bug"}],
+    "createdAt": "2026-03-20T11:00:00Z",
+    "author": {"login": "bob"}
+  },
+  {
+    "number": 103,
+    "title": "dependabot bump",
+    "labels": [],
+    "createdAt": "2026-03-22T11:00:00Z",
+    "author": {"login": "dependabot[bot]"}
+  }
+]

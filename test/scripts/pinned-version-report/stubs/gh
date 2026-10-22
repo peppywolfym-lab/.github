@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Fake gh binary for pinned-version-report bats tests.
+#
+# Routes by argv content so each test can control the three distinct gh call
+# types the script makes without per-fixture stub variants:
+#   - 'repo list'   -> newline-separated repo names  (GH_STUB_REPOS)
+#   - 'contents/'   -> base64-encoded file content    (GH_STUB_CONTENTS, empty = not found)
+#   - '/tags'       -> pre-jq'd TSV lines: name\tsha  (GH_STUB_TAGS_TSV)
+#
+# The script applies --jq filters to API calls internally, so the stub returns
+# the already-processed text that gh would output after the filter.
+#
+# Recognized vars:
+#   GH_STUB_REPOS      newline-separated repo names (for 'repo list')
+#   GH_STUB_CONTENTS   base64 string returned for any 'contents/' API call
+#                      (empty string = file not found; script skips it)
+#   GH_STUB_TAGS_TSV   pre-jq'd TSV output for any '/tags' API call
+#                      (empty = no tags; channel stays unresolved)
+#   GH_STUB_EXIT       exit code (default 0)
+#   GH_STUB_LOG        append-only argv log (shell-quoted, one line per call)
+
+set -euo pipefail
+
+if [ -n "${GH_STUB_LOG:-}" ]; then
+  # shellcheck disable=SC2059
+  printf '%q ' "$@" >>"$GH_STUB_LOG"
+  printf '\n' >>"$GH_STUB_LOG"
+fi
+
+args="$*"
+
+case "$args" in
+  *"repo list"*)
+    printf '%s\n' "${GH_STUB_REPOS:-}"
+    ;;
+  *"contents/"*)
+    printf '%s\n' "${GH_STUB_CONTENTS:-}"
+    ;;
+  *"/tags"*)
+    printf '%s\n' "${GH_STUB_TAGS_TSV:-}"
+    ;;
+  *)
+    ;;
+esac
+
+exit "${GH_STUB_EXIT:-0}"

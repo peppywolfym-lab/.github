@@ -1,0 +1,35 @@
+# Fixture: the #571-correct shape — dispatch inputs resolved in a `prep` job and
+# passed to the reusable via `needs.prep.outputs.*`. No `inputs` context in the
+# reusable `with:`. lint-caller.sh must pass this (exit 0).
+name: clean caller
+on:
+  schedule:
+    - cron: '0 7 * * 5'
+  workflow_dispatch:
+    inputs:
+      focus_area:
+        required: false
+        type: string
+  discussion:
+    types: [created]
+
+jobs:
+  prep:
+    if: github.event_name != 'discussion'
+    runs-on: ubuntu-latest
+    outputs:
+      focus_area: ${{ steps.resolve.outputs.focus_area }}
+    steps:
+      - id: resolve
+        env:
+          FOCUS_AREA: ${{ github.event.inputs.focus_area }}
+        run: echo "focus_area=${FOCUS_AREA:-}" >> "$GITHUB_OUTPUT"
+
+  ideate:
+    needs: [prep]
+    if: github.event_name != 'discussion'
+    uses: org/.github/.github/workflows/reusable.yml@v1
+    with:
+      project_context: |
+        A literal string with no expressions.
+      focus_area: ${{ needs.prep.outputs.focus_area }}

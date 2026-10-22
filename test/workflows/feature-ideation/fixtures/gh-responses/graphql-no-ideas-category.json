@@ -1,0 +1,11 @@
+{
+  "data": {
+    "repository": {
+      "discussionCategories": {
+        "nodes": [
+          {"id": "DC_general", "name": "General"}
+        ]
+      }
+    }
+  }
+}

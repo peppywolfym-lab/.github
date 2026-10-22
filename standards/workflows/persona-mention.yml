@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/persona-mention.yml
+# Standard:        petry-projects/.github/standards/persona-standards.md (§4.1)
+# Reusable:        petry-projects/.github/.github/workflows/persona-mention-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All routing logic lives in the reusable
+#     workflow above, and every per-persona decision lives in that persona's
+#     manifest — not here and not in the reusable.
+#   • You MUST NOT change: the `uses:` ref — it is pinned to the
+#     `persona-mention/v1-stable` channel, a moving tag advanced centrally.
+#     Never repoint it to `@main`, a SHA, or a frozen `@vX.Y.Z` (see
+#     ci-standards.md → Reusable workflow versioning). Also do not change the
+#     trigger events or the job-level `permissions:` block — reusable workflows
+#     can be granted no more permissions than the calling job, so removing the
+#     stanza breaks the reusable's gh API calls.
+#   • Do NOT add a per-persona stub. ONE router serves every persona (§4.1);
+#     a stub per agent is the drift the manifest exists to prevent.
+#   • If you need different behaviour, open a PR against the reusable in the
+#     central repo. A new release is rolled out by moving the channel tag
+#     centrally — never by editing callers, so no fanout PR is needed.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Persona Mention Router — thin caller for the org-level reusable.
+#
+# Adopting this file makes every persona that enables the `mention` surface
+# addressable in this repo as `@petry-projects/<role>` — e.g.
+#
+#     @petry-projects/qa-lead please assess test risk on this PR
+#
+# The handle is an org TEAM, never a user account: '@qa-lead' is a real GitHub
+# account owned by an unrelated person (§4.1).
+#
+# To adopt: copy this file to .github/workflows/persona-mention.yml in your repo.
+# Requires: GH_PAT_WORKFLOWS org secret (already present in petry-projects org).
+name: Persona — Mention Router
+
+on:
+  # issue_comment covers BOTH issues and PR conversation comments.
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  # Discussions cannot run an agent inline (#571) — but this router only parses
+  # and dispatches, and the agent itself runs on the resulting
+  # repository_dispatch, which is exactly the bridge the manifest declares.
+  discussion_comment:
+    types: [created]
+# NOTE: reviewer assignment (pull_request/review_requested) is NOT subscribed
+# here yet, even though §4 says "Reviewer-assignment counts here too". The
+# router has no path for it, and a trigger that fires into a router which
+# ignores it is a dead trigger that only burns runs. Tracked as finding 10 in
+# petry-projects/.github#755; the trigger lands with the routing, not before.
+
+permissions: {}
+
+jobs:
+  persona-mention:
+    permissions:
+      contents: read        # the reusable checks out its tooling repo — required,
+                            # or the call fails at startup (a reusable is granted
+                            # no more than the caller; persona-standards.md §5)
+      issues: read
+      pull-requests: read
+    uses: petry-projects/.github/.github/workflows/persona-mention-reusable.yml@persona-mention/v1-stable  # NOSONAR(githubactions:S7637) first-party channel ref
+    secrets: inherit  # NOSONAR(githubactions:S7635) org secrets are scoped to first-party reusables

@@ -1,0 +1,150 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/initiative-driver.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md
+# Central driver:  petry-projects/.github-private/.github/workflows/initiative-driver.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All dependency-aware release logic (the
+#     `initiative:auto` gate, the DAG / `blocked_by` resolution, max-in-flight,
+#     and the dev-lead label hand-off) lives in the CENTRAL driver above. This
+#     stub only DISPATCHES that central workflow with this repo as target_repo.
+#   • Unlike the initiative-planner stub there is NO reusable: the central driver
+#     is pure-bash (no claude-code-action), so this stub dispatches the central
+#     workflow_dispatch DIRECTLY with `gh workflow run`. No LLM runs here.
+#   • You MUST NOT change: the dispatch target
+#     (-R petry-projects/.github-private -f target_repo=${{ github.repository }}),
+#     the `initiative:auto` label filter, or the PAT guard.
+#   • If you need different release behaviour, open a PR against the central
+#     driver in petry-projects/.github-private — never by editing callers.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Initiative Driver — per-repo dispatcher, thin caller for the central driver.
+#
+# On this repo's issues:[closed, labeled] (plus a safety-net off-peak schedule),
+# this stub dispatches the CENTRAL initiative-driver in
+# petry-projects/.github-private with target_repo=<this repo>. The central
+# driver then sweeps this repo's `initiative:auto` epics and releases their ready
+# sub-issues to dev-lead — so the central driver does not have to watch every
+# enrolled repo's events.
+#
+# Rate-limit gate (#640): before dispatching, this stub asks the source-side
+# agent-rate-limit gate (petry-projects/.github/scripts/agent-rate-limit-gate.sh)
+# whether `initiative-driver` may dispatch right now. initiative-driver is the
+# canary that ENFORCES: the gate derives concurrency / cooldown / daily-budget /
+# consecutive-failure counters from this stub's own run history (no state
+# backend), reads every threshold from standards/agent-rate-limits.json, and
+# serializes a close-event + schedule burst AHEAD of the cancel-in-progress
+# concurrency group so two dispatches cannot race into cancellation (#443/#402).
+# A `defer` simply skips the dispatch step — never a cancel, never a job failure.
+#
+# To adopt:
+#   1. Copy this file verbatim to .github/workflows/initiative-driver.yml in your repo.
+#   2. Ensure the `initiative:auto` label exists on the repo.
+#   3. Confirm the org-level secret GH_PAT_WORKFLOWS is accessible **and its
+#      owner has write access to petry-projects/.github-private** (to dispatch
+#      the central workflow) **and to this repo** (the central driver applies the
+#      `dev-lead` label cross-repo with that PAT; a label applied with
+#      GITHUB_TOKEN would not trigger dev-lead).
+#
+# Standard: https://github.com/petry-projects/.github/blob/main/standards/ci-standards.md
+name: Initiative Driver — Dispatch Central
+
+on:
+  issues:
+    # closed:  a close may unblock successors — re-evaluate this repo's DAG.
+    # labeled: arming an epic with `initiative:auto` starts it immediately
+    #          (the job below filters to that label).
+    types: [closed, labeled]
+  schedule:
+    - cron: "41 3 * * *" # off-peak safety net for missed close events
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One lane per repo so a close burst + the schedule does not fan out duplicate
+  # dispatches. cancel-in-progress=true cancels any pending/running redundant dispatches
+  # since the central driver sweeps all epics anyway.
+  group: initiative-driver-dispatch-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    # On a `labeled` event, only dispatch when the added label is the gate label
+    # (mirror the central driver) — otherwise every label change fans out a dispatch.
+    if: >-
+      github.event_name != 'issues' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'initiative:auto'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Guard — PAT present
+        # PAT required: a workflow_dispatch fired with GITHUB_TOKEN never starts a run.
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::GH_PAT_DON_PETRY (or legacy GH_PAT_WORKFLOWS) is required — a workflow_dispatch fired with GITHUB_TOKEN never starts a run."
+            exit 1
+          fi
+
+      - name: Checkout agent-rate-limit gate tooling
+        # Phase-4 wiring (#640): the gate library + orchestrator live in
+        # petry-projects/.github; an enrolled caller stub does not carry them, so
+        # fetch them read-only into a scratch path. Uses the same PAT as the
+        # dispatch — the workflow's GITHUB_TOKEN cannot read another repo — so the
+        # stub's `permissions:` block is unchanged.
+        # continue-on-error: a tooling-checkout outage must not stop the fleet —
+        # the gate step then finds no script, emits no decision, and the dispatch
+        # step's `!= 'defer'` guard falls through to dispatching (fail-open).
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: petry-projects/.github
+          ref: v1
+          path: .arl-gate-tooling
+          fetch-depth: 1
+          persist-credentials: false
+          token: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+
+      - name: Agent rate-limit admission gate (enforcing)
+        # initiative-driver is the ONE canary agent type that ENFORCES (pure bash,
+        # no model spend, the direct #443 target — AC #5). Reads run history with
+        # the PAT (independent of the `permissions:` block) and emits
+        # decision=allow|defer to $GITHUB_OUTPUT; a defer is honoured by the `if:`
+        # on the dispatch step below. Fail-safe: the step can never fail the job.
+        continue-on-error: true
+        id: arl_gate
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+          ARL_ACTOR: ${{ github.actor }}
+          ARL_TRACKING_REPO: ${{ github.repository }}
+          # For issue events use the event's issue number; for schedule/workflow_dispatch
+          # fall back to a configured repo variable so argate_escalate can post the
+          # breaker marker and apply the needs-human-review label (both are skipped when
+          # tracking_issue is empty). Set INITIATIVE_DRIVER_TRACKING_ISSUE to the epic
+          # or operations issue number for this repo to enable escalation on non-issue runs.
+          ARL_TRACKING_ISSUE: ${{ github.event.issue.number || vars.INITIATIVE_DRIVER_TRACKING_ISSUE || '' }}
+        run: |
+          set -euo pipefail
+          bash .arl-gate-tooling/scripts/agent-rate-limit-gate.sh initiative-driver \
+            --mode enforce \
+            --workflow initiative-driver.yml \
+            --actor "$ARL_ACTOR" \
+            --tracking-repo "$ARL_TRACKING_REPO" \
+            --tracking-issue "$ARL_TRACKING_ISSUE" || true
+
+      - name: Dispatch central initiative-driver
+        # Skipped (clean no-op) ONLY on an explicit `defer` — never a cancel, never
+        # a job failure (#640, AC #1/#2). Fail-OPEN: an empty/missing decision (the
+        # gate step or its tooling checkout failed) still dispatches, because an
+        # outage of the gate must never stop the fleet (ADR §7 fail-safe direction).
+        if: steps.arl_gate.outputs.decision != 'defer'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DON_PETRY || secrets.GH_PAT_WORKFLOWS }}
+        run: |
+          gh workflow run initiative-driver.yml \
+            -R petry-projects/.github-private \
+            -f target_repo=${{ github.repository }}

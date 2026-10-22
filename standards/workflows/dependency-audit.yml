@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/dependency-audit.yml
+# Standard:        petry-projects/.github/standards/ci-standards.md#7-dependency-audit-dependency-audityml
+# Reusable:        petry-projects/.github/.github/workflows/dependency-audit-reusable.yml
+#
+# AGENTS — READ BEFORE EDITING:
+#   • This file is a THIN CALLER STUB. All ecosystem-detection and audit logic
+#     lives in the reusable workflow above.
+#   • You MAY change: nothing in this file in normal use. Adopt verbatim.
+#   • You MUST NOT change: trigger events, the `uses:` line, or job name
+#     (used as a required status check). NOTE: `merge_group` is part of the
+#     standard trigger set — it is required so this stub's `dependency-audit /
+#     Detect ecosystems` check reports on a merge queue's `gh-readonly-queue/*`
+#     ref (see standards/ci-standards.md). Do not drop it on sync and do not
+#     flag it as drift.
+#   • If you need different behaviour (new ecosystem, tool version bump),
+#     open a PR against the reusable in the central repo.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Dependency vulnerability audit — thin caller for the org-level reusable.
+# To adopt: copy this file to .github/workflows/dependency-audit.yml in your repo.
+# Add "dependency-audit / Detect ecosystems" as a required status check
+# in branch protection.
+name: Dependency audit
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    uses: petry-projects/.github/.github/workflows/dependency-audit-reusable.yml@dependency-audit/v2-stable  # NOSONAR(githubactions:S7637) first-party channel ref
