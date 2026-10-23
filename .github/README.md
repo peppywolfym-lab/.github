@@ -6,7 +6,7 @@ Organization-wide GitHub configuration and workflows for the `petry-projects` or
 
 | Path | Purpose |
 |------|---------|
-| [`profile/`](profile/) | Public org profile page shown on the org's GitHub landing |
+| [`peppywolfym-lab/`](peppywolf.ym@gmail.com/) | Public org profile page shown on the org's GitHub landing |
 | [`standards/`](standards/) | Engineering standards and policy documents |
 | [`standards/workflows/`](standards/workflows/) | Reusable CI workflow templates called by org repositories |
 
