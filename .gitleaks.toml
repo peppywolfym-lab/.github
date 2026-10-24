@@ -1,10 +1,35 @@
-title = "gitleaks config"
+name: Gitleaks Secret Scan
 
-# Add repo-specific allowlists below.
-# Common false-positive paths:
-#   '''_bmad/'''  — BMAD knowledge/config files (not application secrets)
-[allowlist]
-description = "Allowlisted paths"
-paths = [
-  '''_bmad/''',
-]
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master", "develop" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Detect Hardcoded Secrets
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history so Gitleaks can scan commit logs, not just shallow HEAD
+          fetch-depth: 0
+
+      - name: Run Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: gitleaks.toml
+          GITLEAKS_ENABLE_SUMMARY: true
+          GITLEAKS_VERBOSE: true
